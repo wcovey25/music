@@ -1,0 +1,5 @@
+requests>=2.31
+mutagen>=1.47
+Pillow>=10.0
+yt-dlp>=2024.1.1
+# optional: keyring (store AI keys in the system keychain), openpyxl (read .xlsx song lists)
