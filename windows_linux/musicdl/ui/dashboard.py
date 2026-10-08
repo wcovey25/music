@@ -375,8 +375,9 @@ class Dashboard:
             a._spm_at = now
             a.live_spm.append(T.searches_per_min())
         spm = a.live_spm[-1] if (a.live_spm and r) else None
+        pct = T.latency_percentiles() if r else None                        # (one reading, for the tile and the chart)
         texts = kpi_texts(r, running, rng, T.elapsed(), T.speed_now(), T.avg_speed(), T.peak, spm,
-                          T.latency_percentiles() if r else None, T.errors if r else 0)
+                          pct, T.errors if r else 0)
         for i, (value, sub) in enumerate(texts):
             self._set(f"kv{i}", value)
             self._set(f"ks{i}", shorten(sub, a.f_tiny, p(self.rects["kpi"][i][2] - 32)) if sub else "")
@@ -401,7 +402,7 @@ class Dashboard:
         self._pipeline(r, running)
         # ---- the servers + API response
         self._servers(r)
-        self._latency(r)
+        self._latency(r, pct)
 
     def _collect(self):
         """Put every finished picture on the canvas (cheap: runs each frame, so a picture shows as soon as it exists)."""
@@ -511,17 +512,16 @@ class Dashboard:
         self._set("srv-empty", "" if hosts else "No servers contacted yet")
         self._right("srv", self.rects["servers"], "typical → slow end" if hosts else "")
 
-    def _latency(self, r):
+    def _latency(self, r, pct):
         if "lat-v" not in self.items:
             return
         a = self.app
         p = a.p
         vals = T.latency_history(60) if r else []
-        pct = T.latency_percentiles() if r else None
         self._set("lat-v", fmt.ms(T.latency_ms()) if vals else "—")
         self._set("lat-s", f"typical {fmt.ms(pct[0])} · 95% under {fmt.ms(pct[1])}" if pct else "")
-        spm = list(a.live_spm)
-        self._set("lat-s2", f"{spm[-1]:.0f} searches / min" if spm and r else "")
+        spm = a.live_spm[-1] if a.live_spm else None
+        self._set("lat-s2", f"{spm:.0f} searches / min" if a.live_spm and r else "")
         w, h = p(self.lbox[2]), p(self.lbox[3])
         self._ask("lat", ((w, h), len(vals), vals[-1] if vals else 0, a.name), charts.sparkline, w, h, vals, a.th, a.S,
                   a.th["info"], 0)
