@@ -17,6 +17,27 @@ def duration(seconds):
     return f"{h} h {m} min" if m else f"{h} h"
 
 
+def duration_range(lo, hi):
+    """A span of time in words that suit its size: '40–60 sec', '2–4 min', '1.4–1.9 h' ('about 3 min' when the two ends
+    round to the same thing, 'under 2 min' when the soon end is nearly nothing, likewise for seconds)."""
+    lo, hi = max(0.0, float(lo)), max(float(lo), float(hi))
+    if hi < 90:
+        a, b = int(round(lo / 5.0)) * 5, int(round(hi / 5.0)) * 5
+        b = max(b, 5)
+        if a == b:
+            return f"about {b} sec"
+        return f"under {b} sec" if a == 0 else f"{a}–{b} sec"
+    if hi < 90 * 60:
+        a, b = int(round(lo / 60.0)), int(round(hi / 60.0))
+        if a == b:
+            return f"about {b} min"
+        return f"under {b} min" if a == 0 else f"{a}–{b} min"
+    a, b = lo / 3600.0, hi / 3600.0
+    if round(a, 1) == round(b, 1):
+        return f"about {b:.1f} h"
+    return f"{a:.1f}–{b:.1f} h"
+
+
 def left(seconds):
     """ETA text: 'About 4 min left', 'Less than a minute left'."""
     if seconds is None:

@@ -55,7 +55,7 @@ class QualityMixin:
         cy = ty + tile_h + 14
         ch = max(110, bh - (cy - by) - 74)
         qv["chart_box"] = (p(bx + 28), p(cy), p(bw - 56), p(ch))
-        qv["chart"] = cv.create_image(p(bx + 28), p(cy), anchor="nw", image=self._chart_photo(self.qpos), tags="B")
+        qv["chart"] = self.put(p(bx + 28), p(cy), self._chart_photo(self.qpos), tags="B")
         # axis hints and node labels under the chart
         ly = cy + ch + 4
         cv.create_text(p(bx + 28 + 4), p(cy + 6), text="Quality", anchor="nw", font=self.f_tiny, fill=hx(th["fg3"]), tags="B")
@@ -90,7 +90,7 @@ class QualityMixin:
         sel = self.s.preset == key
         img = lambda s_, hov: self.cached(("opt", pw, ph, s_, hov, self.name),
                                           lambda: gk.option_image(pw, ph, s_, hov, th, self.S))
-        item = cv.create_image(p(x) - g, p(y) - g, anchor="nw", image=img(sel, False), tags="B")
+        item = self.put(p(x) - g, p(y) - g, img(sel, False), tags="B")
         pr = preset(key, self.s.device)
         room = pw - p(36)
         self.qv["room_tile"] = room
@@ -111,10 +111,19 @@ class QualityMixin:
         return hx(th["fg"] if key == self.qhover else th["fg2"])
 
     # ---------------------------------------------------------------- behaviour
-    def _chart_photo(self, kbps):
+    def _chart_photo(self, kbps, still=False):
+        """The trade-off chart at `kbps`. A chart that is not moving (hover on or off a tile) is kept, so going back to a
+        state seen before costs nothing: drawing it takes long enough to be felt on every tile the pointer crosses."""
         x, y, w, h = self.qv["chart_box"] if self.qv.get("chart_box") else (0, 0, 1, 1)
-        img = charts.tradeoff_chart(w, h, self.tradeoff, kbps, self.s.preset, self.qhover, self.th, self.S)
-        return self.photo("qchart", img)
+
+        def make():
+            return charts.tradeoff_chart(w, h, self.tradeoff, kbps, self.s.preset, self.qhover, self.th, self.S)
+        if still:
+            ph = self.cached(("qchart", w, h, round(kbps, 1), self.s.preset, self.qhover, self.name,
+                              id(self.tradeoff)), make)
+            self.photos["qchart"] = ph
+            return ph
+        return self.photo("qchart", make())
 
     def _estimate_text(self, kbps):
         """'up to about …': in Optimized mode a song is never written bigger than its source deserves."""
@@ -133,7 +142,7 @@ class QualityMixin:
             if k in self.qv["labels"]:
                 self.cv.itemconfigure(self.qv["labels"][k], fill=self._label_color(k))
         if "qpos" not in self.anims:
-            self.cv.itemconfigure(self.qv["chart"], image=self._chart_photo(self.qpos))
+            self.cv.itemconfigure(self.qv["chart"], image=self._chart_photo(self.qpos, still=True))
 
     def pick_preset(self, key):
         if key == self.s.preset or "tiles" not in self.qv:

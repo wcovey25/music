@@ -108,6 +108,8 @@ class SettingsMixin:
                 Row("stepper", "Volume", lo=0, hi=100, step=10, fmt=lambda v: f"{v}%", get=lambda: s.volume,
                     set=volume, show=lambda: s.sounds),
                 Row("switch", "Launch animation", get=lambda: s.splash, set=put("splash")),
+                Row("segment", "Motion", choices=[("full", "Full"), ("reduced", "Reduced")], get=lambda: s.motion,
+                    set=put("motion"), min=70, sub="Reduced uses simpler transitions — smoother on older computers"),
             ]),
             Group("Music folder", [
                 Row("action", "Save songs to", sub=lambda: s.outdir, button="Choose…", cb=self.choose_folder),

@@ -1,13 +1,16 @@
 """
 synth.py — builds the app's four sounds from scratch, so there are no audio files to license or download.
 
-  startup   a warm low swell under three soft bell notes (D major), ~3.5 s
+  startup   "Aurora", ~4.4 s, written to the launch animation (see TIMELINE): a warm pad and a rising breath of air, a soft
+            thump as the icon forms, four glass bells climbing a D-major-9 chord on the ripples, a swish as the light
+            sweeps across the icon, then a wide chord that rings out behind the window
   click     a tiny, dry tick, ~50 ms
   nav       a gentle upward "blip", ~0.5 s with its reverb tail
   complete  a rising C-major bell arpeggio that settles into a chord, ~3.9 s
 
-Bells are sine partials with an inharmonic overtone and a fast-decaying brightness; a small Schroeder reverb
-gives them air. Everything is stereo 44.1 kHz 16-bit, peak-limited well below clipping.
+Bells are sine partials with an inharmonic overtone and a fast-decaying brightness (the launch bells are FM "glass");
+a small Schroeder reverb gives the short cues air and a feedback-delay-network reverb the launch sound. Everything is
+stereo 44.1 kHz 16-bit with TPDF dither, peak-limited well below clipping.
 Run  python -m musicdl.audio.synth  to rewrite the files in audio/assets/.
 """
 import math
@@ -146,11 +149,12 @@ def lowpass(ch, cutoff):
     return out
 
 
-def finish(left, right, peak, fade=0.06, cutoff=None):
-    """Peak-normalise, fade the end to silence, remove any DC offset, and pack as 16-bit stereo."""
+def finish(left, right, peak, fade=0.06, cutoff=None, passes=1):
+    """Peak-normalise, fade the end to silence, remove any DC offset, and pack as 16-bit stereo with TPDF dither
+    (±1 LSB of seeded noise: a quiet tail fades smoothly instead of crackling into steps). `passes` low-pass stages."""
     chans = []
     for ch in (left, right):
-        if cutoff:
+        for _ in range(passes if cutoff else 0):
             ch = lowpass(ch, cutoff)
         mean = sum(ch) / max(1, len(ch))
         chans.append([v - mean for v in ch])
@@ -158,27 +162,169 @@ def finish(left, right, peak, fade=0.06, cutoff=None):
     top = max((abs(v) for c in chans for v in c), default=1.0) or 1.0
     g = peak / top
     nf = int(fade * SR)
+    rnd = random.Random(11)
     pcm = array("h")
     for i in range(n):
         f = min(1.0, (n - i) / nf) if i > n - nf else 1.0
         for c in chans:
             v = (c[i] if i < len(c) else 0.0) * g * f
-            pcm.append(int(max(-1.0, min(1.0, v)) * 32767))
+            q = v * 32767 + (rnd.random() - rnd.random())
+            pcm.append(int(max(-32767, min(32767, round(q)))))
     return pcm
 
 
-# ---------------------------------------------------------------- the four sounds
+# ---------------------------------------------------------------- the launch sound
+
+# When things happen in the launch animation (seconds from the start; ui/splash.py reads these, so the picture and the
+# sound can't drift apart).
+TIMELINE = {"thump": 0.50, "bells": (0.62, 0.80, 0.98, 1.16), "sweep": 1.46, "chord": 1.78}
+STARTUP_SECONDS = 4.4
+
+
+def glass_bell(freq, dur, amp=1.0, decay=1.5, ratio=2.76, index=2.0, idx_decay=0.10, attack=0.002):
+    """An FM 'glass' bell: a bright inharmonic strike that settles within ~0.3 s into a pure tone with a soft octave, the
+    way a struck wine glass does. Sidebands stay under 18 kHz for every note used, so nothing aliases."""
+    n = int(dur * SR)
+    na = max(1, int(attack * SR))
+    wc, wm = 2 * math.pi * freq / SR, 2 * math.pi * freq * ratio / SR
+    out = [0.0] * n
+    env, e2, e3, idx = amp, 0.22 * amp, 0.05 * amp, index
+    k1, k2, k3 = math.exp(-1 / (decay * SR)), math.exp(-1 / (decay * 0.55 * SR)), math.exp(-1 / (decay * 0.30 * SR))
+    ki = math.exp(-1 / (idx_decay * SR))
+    for i in range(n):
+        s = math.sin(wc * i + idx * math.sin(wm * i)) * env + math.sin(2 * wc * i) * e2 + math.sin(3.01 * wc * i) * e3
+        out[i] = s * (i / na if i < na else 1.0)
+        env *= k1
+        e2 *= k2
+        e3 *= k3
+        idx *= ki
+    return out
+
+
+def aurora_pad(dur, amp=0.30, rise=1.3, fall=1.6, side=0):
+    """The warm bed: D–A–E–F♯ over a D, two slightly detuned copies per note (one for each ear), a slow swell, rounded
+    off above ~2 kHz. `side` picks which of the detuned pair this ear gets."""
+    n = int(dur * SR)
+    out = [0.0] * n
+    de = (0.9965, 1.0035)[side]
+    for freq, level in ((73.42, 1.0), (146.83, 0.9), (220.00, 0.55), (329.63, 0.38), (369.99, 0.30)):
+        w = 2 * math.pi * freq * de / SR
+        ph = 1.1 * side
+        for i in range(n):
+            out[i] += level * (math.sin(w * i + ph) + (0.20 * math.sin(2 * w * i) if freq < 150 else 0.0))
+    for i in range(n):
+        t = i / SR
+        env = min(1.0, t / rise) * min(1.0, max(0.0, (dur - t) / fall))
+        out[i] *= amp * env * env * (3 - 2 * env) / 2.4
+    return lowpass(lowpass(out, 2200), 2200)
+
+
+def thump(dur=0.5, amp=0.9, f0=118.0, f1=52.0):
+    """A soft low 'boom' that sinks in pitch — weight for the moment the icon forms."""
+    n = int(dur * SR)
+    out, phase = [0.0] * n, 0.0
+    for i in range(n):
+        t = i / SR
+        f = f1 + (f0 - f1) * math.exp(-t / 0.07)
+        phase += 2 * math.pi * f / SR
+        out[i] = amp * math.exp(-t / 0.15) * math.sin(phase) * min(1.0, i / (0.004 * SR))
+    return out
+
+
+def air(dur, f0, f1, amp, seed, q=1.8, curve=2.0, tail=0.0):
+    """Filtered noise whose centre frequency glides from f0 to f1 (a breath, a swish). The level swells as t**curve and, if
+    `tail` is set, falls away over the last `tail` seconds."""
+    n = int(dur * SR)
+    rnd = random.Random(seed)
+    low = band = 0.0
+    out = [0.0] * n
+    for i in range(n):
+        u = i / n
+        fc = min(6500.0, f0 * (f1 / f0) ** u)
+        f = 2 * math.sin(math.pi * fc / SR)
+        low += f * band
+        high = (rnd.random() * 2 - 1) - low - band / q
+        band += f * high
+        env = u ** curve
+        if tail and i > n - tail * SR:
+            env *= (n - i) / (tail * SR)
+        out[i] = amp * env * band
+    return out
+
+
+def _delay_net(x, wet=1.0, rt60=2.3, predelay=0.020):
+    """A feedback delay network (six delay lines mixed by a Householder matrix, a low-pass in each loop) at half the sample
+    rate — the tail is dark anyway — for a dense, smooth room instead of the ring of a few combs. Returns (left, right)."""
+    half = [0.5 * (x[i] + x[i + 1]) for i in range(0, len(x) - 1, 2)]
+    sr = SR // 2
+    n = len(half) + int(rt60 * 0.9 * sr)
+    half += [0.0] * (n - len(half))
+    delays = [int(ms * sr / 1000) for ms in (29.7, 37.1, 41.1, 47.3, 53.9, 61.3)]
+    gains = [10 ** (-3 * d / (rt60 * sr)) for d in delays]
+    bufs = [[0.0] * d for d in delays]
+    pos = [0] * 6
+    damp = [0.0] * 6
+    pre = int(predelay * sr)
+    lo, ro = [0.0] * n, [0.0] * n
+    sl, sr_ = (1, -1, 1, -1, 1, -1), (1, 1, -1, -1, 1, 1)
+    for i in range(n):
+        vals = [bufs[k][pos[k]] for k in range(6)]
+        for k in range(6):
+            damp[k] += 0.42 * (vals[k] - damp[k])                  # darker with every trip round the loop
+        total = sum(damp) / 3.0                                   # Householder mix: x - (2/N)·sum(x), N = 6
+        xin = half[i - pre] if i >= pre else 0.0
+        for k in range(6):
+            bufs[k][pos[k]] = gains[k] * (damp[k] - total) + (xin if k % 2 == 0 else -xin) * 0.5
+            pos[k] = (pos[k] + 1) % delays[k]
+        lo[i] = sum(v * s for v, s in zip(vals, sl)) * 0.45
+        ro[i] = sum(v * s for v, s in zip(vals, sr_)) * 0.45
+    def up(h):                                                    # back to 44.1 kHz (linear: the tail is under 8 kHz)
+        out = [0.0] * (2 * len(h))
+        for i, v in enumerate(h):
+            nxt = h[i + 1] if i + 1 < len(h) else 0.0
+            out[2 * i], out[2 * i + 1] = v, 0.5 * (v + nxt)
+        return out
+    return up(lo), up(ro)
+
 
 def make_startup():
-    t = ([], [])
-    place(t, pad(146.83, 2.6, 0.30), 0.0, 0.0)                              # D3 warmth
-    place(t, bell(587.33, 2.4, 0.80, decay=0.95), 0.00, -0.10)              # D5
-    place(t, bell(880.00, 2.0, 0.55, decay=0.85), 0.22, 0.32)               # A5
-    place(t, bell(1479.98, 1.7, 0.32, decay=0.70, bright=0.7), 0.46, 0.45)  # F#6
-    left, right = reverb(t[0], 0, 0.38, 0.84), reverb(t[1], 1, 0.38, 0.84)
-    return finish(left, right, 0.50, fade=0.25, cutoff=6500)
+    T = TIMELINE
+    n = int(STARTUP_SECONDS * SR)
+    dry = ([0.0] * n, [0.0] * n)
+    send = [0.0] * n                                              # what goes to the room
+    pad_dur = 3.7
+    for side, ch in enumerate(dry):
+        for i, v in enumerate(aurora_pad(pad_dur, side=side)):
+            ch[i] += v
+    for i, v in enumerate(air(1.30, 450, 6200, 0.16, 5, curve=2.2, tail=0.12)):
+        dry[0][i] += v * 0.8
+    for i, v in enumerate(air(1.30, 520, 6000, 0.16, 6, curve=2.2, tail=0.12)):
+        dry[1][i] += v * 0.8
+    voices = [(thump(0.55, 0.85), T["thump"], 0.0, 0.0)]
+    for (freq, amp, pan), start in zip(((587.33, 0.78, -0.30), (739.99, 0.62, -0.05), (880.00, 0.58, 0.20), (1318.51, 0.40, 0.42)),
+                                       T["bells"]):
+        voices.append((glass_bell(freq, 2.6, amp, decay=1.5, index=2.0 if freq < 1000 else 1.4), start, pan, 0.55))
+    voices.append((air(0.42, 1800, 6300, 0.20, 9, q=2.4, curve=1.2, tail=0.18), T["sweep"], 0.0, 0.25))
+    for k, (freq, amp, pan) in enumerate(((2349.32, 0.07, -0.4), (2959.96, 0.06, 0.4), (3520.00, 0.05, 0.1))):     # glints
+        voices.append((glass_bell(freq, 0.9, amp, decay=0.35, index=0.8), T["sweep"] + 0.02 + 0.07 * k, pan, 0.7))
+    for freq, amp, pan in ((293.66, 0.50, -0.45), (440.00, 0.42, 0.40), (659.25, 0.36, -0.20), (739.99, 0.30, 0.25),
+                           (1174.66, 0.22, 0.05)):                # the wide chord the whole thing settles into
+        voices.append((glass_bell(freq, 2.6, amp, decay=1.8, index=0.9, attack=0.03), T["chord"], pan, 0.8))
+    for voice, start, pan, wet in voices:
+        place(dry, voice, start, pan)
+        s0 = int(start * SR)
+        for i, v in enumerate(voice):
+            if s0 + i < n:
+                send[s0 + i] += v * wet
+    rl, rr = _delay_net(send)
+    left = [(dry[0][i] if i < n else 0.0) + 0.55 * rl[i] for i in range(len(rl))]
+    right = [(dry[1][i] if i < n else 0.0) + 0.55 * rr[i] for i in range(len(rr))]
+    keep = int((STARTUP_SECONDS + 0.2) * SR)
+    return finish(left[:keep], right[:keep], 0.42, fade=0.7,
+                  cutoff=15000, passes=2)
 
 
+# ---------------------------------------------------------------- the four sounds
 def make_click():
     t = ([], [])
     place(t, tick(), 0.0, 0.0)

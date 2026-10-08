@@ -138,6 +138,7 @@ class Settings:
     enhance: str = "off"               # off | clarity | warmth | bass | vocal
     dynamics: str = "off"              # off | gentle | strong
     polish: bool = False               # Optimized mode: even out the volume and trim silence
+    welcomed: bool = False             # the first-run sheets have been seen (or skipped)
     shield_lock: bool = False          # the app's own files are read-only against deletion and change (core/shield.py)
     clean_versions: bool = False       # False = explicit (the song as released, tagged explicit); True = clean edits
     # performance
@@ -157,6 +158,7 @@ class Settings:
     sounds: bool = True
     volume: int = 60
     splash: bool = True
+    motion: str = "full"               # full | reduced — less animation (also set by Windows' "Show animations" switch)
     outdir: str = ""
     # AI mode (keys are stored separately, see get_secret)
     ai_enabled: bool = False
@@ -260,6 +262,8 @@ class Settings:
             self.upgrade = "ask"
         if self.close_match not in ("ask", "auto", "skip"):
             self.close_match = "ask"
+        if self.motion not in ("full", "reduced"):
+            self.motion = "full"
         from .audio import process
         self.level_target = max(-24, min(-8, int(self.level_target)))
         self.trim_db = max(-70, min(-30, int(self.trim_db)))

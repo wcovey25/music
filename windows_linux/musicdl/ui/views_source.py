@@ -20,6 +20,7 @@ from ..meta import artwork
 from ..telemetry.stats import T
 from . import fmt
 from . import glass as gk
+from .card3d import Tilt
 from .glass import hx
 from .pulse import Pulse
 
@@ -363,9 +364,7 @@ class SourceMixin:
         ax, ay, aw, ah = self._ax()
         col = self.col
         ts = 96
-        tile = self.cached(("tile", id(col), bool(self.col_art), p(ts), self.name),
-                           lambda: gk.tile_image(p(ts), th, self.S, self.col_art))
-        self.a_items["tile"] = cv.create_image(p(ax + 28), p(ay + 24), anchor="nw", image=tile, tags="A")
+        self.a_items["tile"] = Tilt(self, gk.tile_image(p(ts), th, self.S, self.col_art), p(ax + 28), p(ay + 24))
         tx = ax + 28 + ts + 20
         btn_w = 150
         room = p(aw - (tx - ax) - btn_w - 28 - 24)

@@ -5,8 +5,8 @@ folder. A calm, glassy window; no terminal.
 
 - **Optimized mode** (default): pick *Good*, *Better* or *Best* and press Download.
 - **Advanced mode**: MP3, AAC, FLAC, ALAC or WAV; bitrate, sample rate, bit depth, your own ffmpeg flags, a **Sound**
-  tab (even volume, silence trim, fades, EQ), lyrics, naming templates, and a live dashboard (speed graph, searches per
-  minute, service latency, time left).
+  tab (even volume, silence trim, fades, EQ), lyrics, naming templates, a spectrum of what the chosen format keeps, and a
+  **Live** dashboard (speed ribbon, a pillar per processor core, songs in flight, how fast each server answers).
 - **A search bar**: type a name and pick from suggestions; songs that can't be found exactly get **close matches** to
   choose from; **clean versions** on request; files never bigger than their source deserves.
 - **Protection**: the app checks its own files at every start and puts back what a cleaner deleted.
@@ -77,7 +77,8 @@ Change the folder under **Settings** (the gear).
 once), accuracy (length tolerance, minimum quality, replace low-quality files, YouTube fallback, better versions, close
 matches), **Songs** (clean versions; in Optimized mode **Polish every song**, which evens out the volume and trims dead
 silence at the ends — in Advanced the same controls are on the **Sound** tab), appearance (Auto / Light / Dark), sounds
-and volume, the launch animation, the music folder, AI Mode, and **Protection** (see *Keeping the app whole*).
+and volume, the launch animation, **Motion** (*Full* / *Reduced*), the music folder, AI Mode, and **Protection** (see
+*Keeping the app whole*).
 
 ### The search bar
 
@@ -288,6 +289,35 @@ are untested**, as is how the governor behaves on a real long run.
 While it works, the progress card shows a live waveform that moves with the real download speed and flares when a song
 finishes. It turns amber when paused for a full disk, and settles when everything is done. It is purely cosmetic.
 
+### The rest of the window
+
+- **First run.** The first time it opens, a few short sheets: where songs go (keep the folder or **Choose…** another;
+  the app writes a test file there, and if Windows Security's *Controlled folder access* blocks it, says so and how to
+  allow the app), then **Protect the app** (locks its files read-only; names any cleaner or scanner installed). Every
+  step has **Not now**, and all of it is in Settings later. If the start-up file check finds something while the
+  sheets are up, its question waits until they are done. People updating from an earlier V3 also see the sheets once.
+- **Live tab** (Advanced, during a download): time left with a likely range, songs done, speed (now / average / peak),
+  searches per minute and API response time; a speed ribbon over the last minute; a glass pillar per processor core,
+  filled to how busy it is; a capsule per song in flight, coloured by what it is doing (searching, downloading,
+  encoding, tagging); and how fast each server answers (typical → slow end). On a small window some boxes are left
+  out. The pictures are drawn on a background thread, so the window stays smooth.
+- **Format tab spectrum** (Advanced, when the window is tall enough): bars from 20 Hz up, lit up to the highest
+  frequency the chosen format and bitrate keep (*Up to about 16 kHz* for MP3 128, the full band for FLAC/WAV), with the
+  dynamic range (96 dB, 144 dB for 24-bit). It glides when you change the format. It is an illustration of typical
+  encoder cut-offs, not a measurement of your files.
+- **Artwork tilt.** The cover on the list tile leans toward the pointer.
+- **Motion.** *Reduced* (Settings → Experience) keeps the tile still, shortens fades and slides, and uses a simpler
+  launch; it is also used when Windows' *Animation effects* is off (Settings → Accessibility → Visual effects).
+- **Launch.** A new start-up animation (the icon forms, lights up and flies into the header) with a new start-up sound
+  made to match. Press Esc, Space, Enter or click to skip it; switch it off under *Launch animation*.
+- **Icon.** A new app icon; on Windows a multi-size `.ico` (16–256 px) is written to the cache folder so the taskbar and
+  Alt-Tab get crisp small sizes.
+
+*Tested on Linux (Tk 9, headless, light and dark, 1100×860), with offline tests of the layout and drawing code.
+**Untested on a real Windows PC**: how these look and how smoothly they run there (DPI scaling 125–200 %, slower
+computers), the taskbar/Alt-Tab icon, Windows' Animation-effects switch, and the Controlled-folder-access check. On a
+computer whose processor kinds can't be read (all of them here) the cores show as one group.*
+
 ### How it searches and downloads
 
 - **Matching:** artist, title and length are compared with accents, apostrophes, `&`/`and`, number words ("4" / "four")
@@ -402,7 +432,9 @@ Delete those folders to reset the app completely. Your songs are never touched.
 ```
 musicdl/
   ui/         window: shell.py (canvas, hit regions, animation), glass.py (Pillow-drawn liquid glass), app.py + views_*.py,
-              protect.py (Settings › Protection and the start-up check)
+              protect.py (Settings › Protection and the start-up check),
+              welcome.py (first-run sheets), dashboard.py + viz.py + painter.py (Live tab), spectrum.py,
+              card3d.py (artwork tilt), splash.py (launch), icon.py
   ingest/     links → song lists (Spotify, Apple, YouTube, Amazon, Pandora, web pages, spreadsheets, text search);
               suggest.py (the search bar's suggestions)
   core/       the downloader engine: sources, matching, parallel workers, retries, cleanup; closematch.py (songs that
@@ -412,7 +444,7 @@ musicdl/
   telemetry/  speed, latency, searches per minute, ETA
   ai/         Ollama / OpenAI / Anthropic / Gemini connectors and the tasks built on them
   platform_.py   everything that differs per operating system
-tests/        cd tests && py -3 -m unittest      (518 tests, no internet needed)
+tests/        cd tests && py -3 -m unittest      (559 tests, no internet needed)
               py -3 stress.py 400 8              (400 songs, 8 at once: memory, threads, Stop)
               ui_shots.py                        (screenshots of the window for a look; needs a display)
 ```

@@ -15,6 +15,7 @@ from PIL import Image, ImageTk
 from .. import platform_
 from ..audio.sounds import Sounds
 from . import glass as gk
+from . import icon
 from .glass import hx, mix
 
 log = logging.getLogger("musicdl")
@@ -29,6 +30,7 @@ class Shell:
         self.root = root = tk.Tk()
         root.title(title)
         self.S = platform_.ui_scale(root)
+        self.D = 1                                   # pixels per point of the pictures (the macOS edition uses 2 on Retina)
         self.name = self._theme_name()
         self.th = gk.THEMES[self.name]
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
@@ -36,11 +38,8 @@ class Shell:
         root.geometry(f"{w}x{h}+{(sw - w) // 2}+{max(0, (sh - h) // 3)}")
         root.minsize(min(w, int(minimum[0] * self.S)), min(h, int(minimum[1] * self.S)))
         self._make_fonts()
-        self._icon = ImageTk.PhotoImage(gk.app_icon(256))
-        try:
-            root.iconphoto(True, self._icon)
-        except tk.TclError:
-            pass
+        self._icon = ImageTk.PhotoImage(icon.app_icon(256))
+        self._set_icon()
         self.cv = tk.Canvas(root, highlightthickness=0, bd=0, bg=hx(self.th["base"]))
         self.cv.pack(fill="both", expand=True)
 
@@ -59,6 +58,7 @@ class Shell:
         self._relayout_job = None
         self._last = time.time()
         self.busy = False                        # something is moving on its own (progress shimmer etc.)
+        self.splashing = False                   # the launch animation is playing: the screen behind it takes no input
         self.sounds = Sounds(lambda: self.s)
 
         cv = self.cv
@@ -70,6 +70,8 @@ class Shell:
         cv.bind("<Leave>", lambda e: self._set_hover(None))
         platform_.bind_wheel(root, self._on_wheel)
         root.bind("<Escape>", lambda e: self.on_escape())
+        for key in ("<Escape>", "<space>", "<Return>"):                       # these skip the launch animation
+            root.bind(key, lambda e: self.skip_splash() if self.splashing else None, add="+")
         root.protocol("WM_DELETE_WINDOW", self.close)
         self._loop_job = root.after(33, self._loop)
 
@@ -79,6 +81,7 @@ class Shell:
     def paint(self): ...
     def on_tick(self, now, dt): ...
     def on_sheet(self): ...                   # a question just opened or closed
+    def skip_splash(self): ...                # a click or key while the launch animation plays
     def on_escape(self):
         if self.sheet_state:
             self._sheet_pick(self.sheet_state["default"])
@@ -110,18 +113,44 @@ class Shell:
         th = self.th
         return hx(th[name] if name in th else th["fg2"])
 
-    def photo(self, key, img):
-        ph = ImageTk.PhotoImage(img)
-        self.photos[key] = ph
+    def _set_icon(self):
+        """The taskbar and Alt+Tab icon. On Windows a multi-size .ico (16–256 px, each drawn for its size) is crisper
+        than one big picture shrunk by the system; elsewhere, or if the .ico can't be written, the 256-px picture."""
+        path = icon.ico_file() if platform_.IS_WINDOWS else None
+        if path:
+            try:
+                self.root.iconbitmap(default=path)
+                return
+            except tk.TclError:
+                log.debug("iconbitmap failed", exc_info=True)
+        try:
+            self.root.iconphoto(True, self._icon)
+        except tk.TclError:
+            pass
+
+    def tkphoto(self, img, scale=None):
+        """A Tk photo of `img` (the macOS edition resamples denser pictures here; Windows draws one pixel per point)."""
+        return ImageTk.PhotoImage(img)
+
+    def photo(self, key, img, scale=None):
+        ph = self.photos[key] = self.tkphoto(img, scale)
         return ph
 
-    def cached(self, key, make):
+    def cached(self, key, make, scale=None):
         ph = self.cache.get(key)
         if ph is None:
             if len(self.cache) > 700:
                 self.cache.clear()
-            ph = self.cache[key] = ImageTk.PhotoImage(make())
+            ph = self.cache[key] = self.tkphoto(make(), scale)
         return ph
+
+    _HOME = {"nw": (0, 0), "n": (.5, 0), "ne": (1, 0), "w": (0, .5), "center": (.5, .5), "e": (1, .5), "sw": (0, 1),
+             "s": (.5, 1), "se": (1, 1)}
+
+    def corner(self, x, y, ph, anchor="nw"):
+        """Top left of `ph` placed with `anchor` at (x, y)."""
+        fx, fy = self._HOME[anchor]
+        return x - fx * ph.width(), y - fy * ph.height()
 
     def put(self, x, y, ph, anchor="nw", tags=()):
         """create_image for a photo made by photo/cached (the macOS edition places denser pictures here; Windows draws
@@ -146,9 +175,10 @@ class Shell:
 
     # ---------------------------------------------------------------- hit regions
     def region(self, box, cb=None, group="view", hover=None, press=None, move=None, release=None, sound="click",
-               cursor=True, enabled=lambda: True, key=None):
+               cursor=True, enabled=lambda: True, key=None, track=None):
+        """`hover(on)` runs when the pointer enters or leaves; `track(event)` on every move while it is inside."""
         r = dict(box=tuple(box), cb=cb, group=group, hover=hover, press=press, move=move, release=release,
-                 sound=sound, cursor=cursor, enabled=enabled, key=key)
+                 sound=sound, cursor=cursor, enabled=enabled, key=key, track=track)
         self.regions.append(r)
         return r
 
@@ -160,6 +190,8 @@ class Shell:
             self._pressed = None
 
     def _find(self, x, y):
+        if self.splashing:
+            return None
         sheet = [r for r in self.regions if r["group"] == "sheet"]
         pop = sheet or [r for r in self.regions if r["group"] == "popup"]
         pool = pop if pop and (sheet or not (self.popup_state or {}).get("quiet")) else self.regions
@@ -180,9 +212,15 @@ class Shell:
         self.cv.config(cursor="hand2" if r and r["cursor"] else "")
 
     def _on_motion(self, e):
-        self._set_hover(self._find(e.x, e.y))
+        r = self._find(e.x, e.y)
+        self._set_hover(r)
+        if r and r["track"]:
+            r["track"](e)
 
     def _on_press(self, e):
+        if self.splashing:
+            self.skip_splash()
+            return
         if self.popup_state and not any(r["group"] == "popup" and r["box"][0] <= e.x <= r["box"][2]
                                         and r["box"][1] <= e.y <= r["box"][3] for r in self.regions):
             quiet = self.popup_state.get("quiet")
@@ -314,6 +352,17 @@ class Shell:
         return dict(item=item, texts=texts)
 
     # ---------------------------------------------------------------- animation
+    _rm_at, _rm = -99.0, False
+
+    def reduced(self):
+        """Less animation: the Motion setting, or Windows' own animation switch (asked about at most once a minute)."""
+        if self.s.motion == "reduced":
+            return True
+        now = time.time()
+        if now - self._rm_at > 60.0:
+            self._rm_at, self._rm = now, platform_.reduce_motion()
+        return self._rm
+
     def animate(self, key, dur, update, ease=gk.ease, done=None, delay=0.0):
         """Run update(eased 0..1) every frame for `dur` seconds. A new animation with the same key replaces the old."""
         self.anims[key] = dict(t0=time.time() + delay, dur=max(0.001, dur), update=update, ease=ease, done=done)
@@ -348,7 +397,11 @@ class Shell:
             pass
         except Exception:
             log.exception("tick failed")
-        self._loop_job = self.root.after(16 if self.anims else (33 if self.busy else 90), self._loop)
+        try:
+            hidden = not self.root.winfo_viewable()                    # minimised: nobody sees the frames
+        except tk.TclError:
+            hidden = False
+        self._loop_job = self.root.after(250 if hidden else 16 if self.anims else (33 if self.busy else 90), self._loop)
 
     # ---------------------------------------------------------------- content transitions
     def _ids(self, tag):
@@ -390,13 +443,15 @@ class Shell:
         items = self._fade_items(tag)
         if not items:
             return
+        if self.reduced():                                                              # no travelling, a short fade
+            dy, dur, delay = 0, min(dur, 0.18), min(delay, 0.06)
         shift = self.p(dy)
         parts = []
         for it, kind, opt, final, bg in items:
             rgb = self._rgb(final, self.cv) if opt and final else None
             parts.append((it, kind, opt, rgb, bg, 0.0))
             if opt and rgb:
-                self.cv.itemconfigure(it, **{opt: hx(bg)})
+                self.cv.itemconfigure(it, state="normal", **{opt: hx(bg)})
             elif not opt:
                 self.cv.itemconfigure(it, state="hidden")
             self.cv.move(it, 0, shift)
@@ -429,6 +484,8 @@ class Shell:
     def dismiss(self, tag, dur=0.13, done=None, dy=-6):
         """Fade the items under `tag` out (then call done, which usually draws the replacement)."""
         items = self._fade_items(tag)
+        if self.reduced():
+            dy, dur = 0, min(dur, 0.07)
         shift = self.p(dy)
         parts = [(it, opt, self._rgb(final, self.cv) if opt and final else None, bg) for it, kind, opt, final, bg in items]
         if not parts:
@@ -467,7 +524,7 @@ class Shell:
         old = self.scene
         self.scene = new_scene
         item = self.cv.find_withtag("scene")
-        if not item or old is None or old.size != new_scene.size:
+        if not item or old is None or old.size != new_scene.size or self.reduced():
             self._set_scene_image(new_scene)
             if done:
                 done()
@@ -482,8 +539,11 @@ class Shell:
                 done()
         self.animate("scene-fade", dur, update, gk.ease, fin)
 
+    def scene_photo(self, img):
+        return self.photo("scene", img)
+
     def _set_scene_image(self, img):
-        self.cv.itemconfigure("scene", image=self.photo("scene", img))
+        self.cv.itemconfigure("scene", image=self.scene_photo(img))
 
     # ---------------------------------------------------------------- scrolling
     def scroller(self, key, area, total, redraw, step=48):

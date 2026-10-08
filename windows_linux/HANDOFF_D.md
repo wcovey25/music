@@ -1,5 +1,8 @@
 # Handoff: finishing Group D (interface) of the Mac → Windows port
 
+> **Completed.** Group D is done; see the Group D table in `PORT_NOTES.md` for what was ported, adapted or skipped and
+> what is untested. This file is kept as the record of the plan.
+
 Groups A (networking), B (search and matching), C (sound and clean versions) and E (protection) are **done and
 committed** on `claude/loving-ptolemy-1hu6b5`. **Group D, the interface polish, is not started.** This file has
 everything needed to finish it. Read `PORT_NOTES.md` first; it holds the inventory and the status tables.

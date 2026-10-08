@@ -110,14 +110,25 @@ Diff lines are `diff | grep -c '^[<>]'` (mac vs this tree). "Newer" says whose s
 | --- | --- | --- |
 | E1 core/shield.py | done, adapted | manifest (size + SHA-256), snapshot zip in `%APPDATA%\MusicDownloader\shield`, check / restore deleted / report changed / accept update, `boot()` run by `MusicDownloader.pyw` before the package is imported (and the checker itself taken from the snapshot if it was deleted). macOS flags → Windows **read-only attribute** (`os.chmod` without `S_IWRITE`). `.app` bundle code removed; a git checkout is never sealed. Lifeline: `Restore Music Downloader.bat` (cmd + PowerShell `Expand-Archive`, `attrib -R` first; `%` and `'` escaped; CRLF). Fixed while testing: several backups within the same second could sort below older ones and be pruned at once (`_next_stamp`) — the Mac file has the same bug |
 | E2 backups | done | settings.json (last 3 distinct copies; a damaged file is set aside as `.damaged`, `Settings.load` heals first) and, new on Windows, each song folder's `.musicdl.json` (`backup_library` after every run, `heal_library` when `Library` finds it unreadable; a deleted record stays deleted) |
-| E3 UI | done | `ui/protect.py` (ProtectMixin: check 3.2 s after start, "files changed" / "needs repair" sheets, Settings → Protection: status, lock, check now, cleaners and scanners, folders to exclude, Windows Security link, recovery script). `platform_.cleaner_apps` (Program Files folders; `MUSICDL_APP_DIRS` for tests), `open_virus_settings` (`windowsdefender://threatsettings/`). The Mac's first-run walk-through is part of D (see HANDOFF_D.md) |
+| E3 UI | done | `ui/protect.py` (ProtectMixin: check 3.2 s after start, "files changed" / "needs repair" sheets, Settings → Protection: status, lock, check now, cleaners and scanners, folders to exclude, Windows Security link, recovery script). `platform_.cleaner_apps` (Program Files folders; `MUSICDL_APP_DIRS` for tests), `open_virus_settings` (`windowsdefender://threatsettings/`). The Mac's first-run walk-through is D5 |
 | Tests | done | `test_shield.py` (33): seal/check/restore/report/accept/update, tampered snapshot refused, runtime losses named, lock/unlock, `boot`, the real `.pyw` start-up step in a subprocess, lifeline quoting and line endings, settings and library backups and healing, `Settings.load` on damaged files, cleaner detection |
 
-### Group D — interface: **not started** — see `HANDOFF_D.md`
+### Group D — interface: **done (untested on Windows)**
+
+| Item | Status | Notes |
+| --- | --- | --- |
+| D1 Live dashboard | done | `ui/painter.py`, `ui/viz.py`, `ui/dashboard.py` as the Mac files; dashboard wording: "battery saver" for Low Power Mode, the Apple Music line removed. `views_advanced.py` Live tab → `Dashboard`; `RunState.pace_songs` / `pace_state` from the `pace` event. Windows `core_tiers()` is None, so the cores are one group. Tests: `test_interface.py` (ribbon/pillar/capsule geometry, log scale, picture sizes in both themes, layout tiers stay inside the box, stage groups, server names, the four numbers, painter newest-only / token / survives an error) |
+| D2 artwork tilt | done | `ui/card3d.py` as the Mac file; `views_source.py` draws the tile through `Tilt`; `shell.region(..., track=)` added. Tests: flat corners, identity transform, quantizing, one picture per tilt, a Tilt on Tk following the pointer, settling back, still with Reduced motion |
+| D3 spectrum | done | `ui/spectrum.py` as the Mac file; Format tab builds it when the card is at least 470 pt tall (`SPEC_MIN`), `tick_spec` in `tick_card_b`. Tests: cut-offs per format/bitrate, nearest bitrate, never past the sample rate, 24-bit range, settings → target, scale round trip, picture size |
+| D4 Motion + launch | merged | `config.motion` (full/reduced, clamped); Settings → Experience → Motion; `Shell.reduced()` = the setting or `platform_.reduce_motion()` (asked at most once a minute); reduced → shorter reveal/dismiss, no scene cross-fade, still tile, the splash's calm path. `ui/splash.py` from the Mac (icon forms, flies into the header; the page is built hidden under it with `paint(staged=True)`), Liquid-Glass parts removed. `audio/synth.py` from the Mac (new app-made start-up sound timed to the animation, TPDF dither); `startup.wav` regenerated; `sounds.py` system-sound style **skipped**. Fixed vs. the Mac: with the splash on, the Mac never starts the connection prewarm or the suggestion warm-up — here `start_followups()` does both from either path. Tests: frames of both paths, title timing, calm is shorter, `reduced()` with the setting / Windows switch / once-a-minute cache, config clamp and round trip |
+| D5 first run | done, adapted | `ui/welcome.py` written for Windows: hello → folder (Choose…; a test file is written, and *Controlled folder access* gets its own sheet when the write is refused) → protect (uses ProtectMixin's `set_shield_lock`, `start_shield`, `cleaner_note`) → done. The Music-app permission step and the quarantine flag are **skipped** (macOS only). `config.welcomed`; `protect.on_shield` holds its sheet until `welcomed` and the walk-through shows it at the end. Existing users see the sheets once (as on the Mac). Tests: the whole walk, Not now, skipping protection, waits for the splash and other sheets, the held protection sheet, blocked folder, Choose…, `can_write`, `on_shield` gating |
+| D6 icon | done, adapted | `ui/icon.py` without the macOS margin; `glass.app_icon` delegates to it. `ico_file()` writes a 16–256 px `.ico` (each size drawn for itself) to `cache/icons/app-<fingerprint>.ico`, older ones removed; `shell` uses `iconbitmap(default=…)` on Windows, `iconphoto` elsewhere. Tests: sizes, transparent corners, every size in the `.ico`, written once, stale ones removed |
+| D7 small files | merged | `charts.py`, `fmt.py` (`duration_range`), `views_quality.py`, `rows.py` taken from the Mac (D-only differences); `shell.py`: `D = 1`, `tkphoto`/`photo`/`cached` with a scale argument, `corner()`, `scene_photo()`, skip keys for the splash, 250 ms loop while minimised |
+| `tests/ui_shots.py` | extended | launch animation, first-run sheets, the held protection sheet, Live during a made-up run, the tilted tile, Settings → Experience; light and dark, 0 errors |
 
 ## 3. What has not been tried on a real Windows PC
 
-Everything was tested on Linux (CPython 3.11, Tk 9.0) with 518 offline tests, and the window was looked at under Xvfb
+Everything was tested on Linux (CPython 3.11, Tk 9.0) with 559 offline tests, and the window was looked at under Xvfb
 (`tests/ui_shots.py`, light and dark). Not run on Windows:
 
 - the Windows API readings of A4 (CPU, memory, power, priorities, Reduce motion);
@@ -125,4 +136,7 @@ Everything was tested on Linux (CPython 3.11, Tk 9.0) with 518 offline tests, an
   detection against real installs, and any real cleaner or scanner;
 - `MusicDownloader.pyw` started by double-click (the start-up step was run with `python` on Linux);
 - real services: Deezer suggestions, YouTube close-match searches and clean-version searches were faked;
-- how the EQ presets and dynamics sound on real music.
+- how the EQ presets and dynamics sound on real music;
+- the interface of Group D on Windows itself: drawing speed of the Live pictures and the launch on slower computers,
+  125–200 % display scaling, the `.ico` in the taskbar and Alt-Tab, Windows' Animation-effects switch, and the
+  Controlled-folder-access check; nobody has listened to the new start-up sound.

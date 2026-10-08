@@ -595,28 +595,10 @@ def x_icon(size, color):
     return _draw(size, fn)
 
 
-def app_icon(size):
-    """Gradient squircle with glossy highlight and a pair of beamed notes."""
-    ss = 4
-    s = size * ss
-    mask = shape_mask(s, s, int(s * 0.26), ss=1, n=4.0)
-    grad = Image.composite(Image.new("RGB", (s, s), (112, 86, 235)), Image.new("RGB", (s, s), (24, 140, 255)),
-                           corners(s, s, 0, 120, 140, 255))
-    img = grad.convert("RGBA")
-    img.putalpha(mask)
-    over(img, (255, 255, 255), ImageChops.multiply(vgrad(s, s, 110, 0, 0.55), mask))
-    notes = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-    d = ImageDraw.Draw(notes)
-    white = (255, 255, 255, 255)
-    d.ellipse((s * .245, s * .625, s * .475, s * .795), fill=white)
-    d.ellipse((s * .565, s * .565, s * .795, s * .735), fill=white)
-    d.rectangle((s * .435, s * .30, s * .475, s * .71), fill=white)
-    d.rectangle((s * .755, s * .24, s * .795, s * .65), fill=white)
-    d.polygon([(s * .435, s * .30), (s * .795, s * .24), (s * .795, s * .335), (s * .435, s * .395)], fill=white)
-    over(img, (20, 20, 90), scaled(soft_blur(notes.getchannel("A"), 6 * ss), 0.35))
-    img.alpha_composite(notes)
-    over(img, (255, 255, 255), scaled(ImageChops.multiply(ring_mask(s, s, int(s * .26), max(2, ss)), corners(s, s, 255, 60, 60, 160)), 0.7))
-    return img.resize((size, size), Image.LANCZOS)
+def app_icon(size, margin=0.0):
+    """The app's icon `size` px across (drawn, and kept on disk, by icon.py)."""
+    from .icon import app_icon as draw
+    return draw(size, margin)
 
 
 def glow_ring(size, color, alpha=1.0, width=0.04):

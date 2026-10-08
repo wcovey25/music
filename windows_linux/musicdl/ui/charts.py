@@ -66,6 +66,27 @@ def pchip(xs, ys):
     return f
 
 
+_GRADS = {}
+
+
+def _vgrad(*a):
+    """Gradient masks never change for a given size, and the charts redraw on every hover: keep the last few."""
+    return _cached(("v",) + a, gk.vgrad, a)
+
+
+def _hgrad(*a):
+    return _cached(("h",) + a, gk.hgrad, a)
+
+
+def _cached(key, fn, a):
+    got = _GRADS.get(key)
+    if got is None:
+        if len(_GRADS) > 16:
+            _GRADS.clear()
+        got = _GRADS[key] = fn(*a)
+    return got
+
+
 def _canvas(w, h):
     return Image.new("RGBA", (w * SS, h * SS), (0, 0, 0, 0))
 
@@ -82,10 +103,13 @@ def _line_mask(size, pts, width):
 
 def _glow_dot(img, x, y, r, color, th):
     """A filled dot with a soft halo, drawn into a supersampled RGBA image."""
-    halo = Image.new("L", img.size, 0)
-    ImageDraw.Draw(halo).ellipse((x - r * 2.4, y - r * 2.4, x + r * 2.4, y + r * 2.4), fill=255)
+    reach = int(r * 2.4 + r * 1.3 * 3) + 2                    # the halo and its blur only touch this square
+    x0, y0 = max(0, int(x) - reach), max(0, int(y) - reach)
+    x1, y1 = min(img.width, int(x) + reach), min(img.height, int(y) + reach)
+    halo = Image.new("L", (x1 - x0, y1 - y0), 0)
+    ImageDraw.Draw(halo).ellipse((x - x0 - r * 2.4, y - y0 - r * 2.4, x - x0 + r * 2.4, y - y0 + r * 2.4), fill=255)
     halo = gk.soft_blur(halo, r * 1.3)
-    gk.over(img, color, gk.scaled(halo, 0.55))
+    gk.over(img, color, gk.scaled(halo, 0.55), at=(x0, y0))
     d = ImageDraw.Draw(img)
     d.ellipse((x - r, y - r, x + r, y + r), fill=tuple(color) + (255,))
     d.ellipse((x - r * 0.45, y - r * 0.45, x + r * 0.45, y + r * 0.45), fill=(255, 255, 255, 235))
@@ -103,7 +127,7 @@ def speed_chart(w, h, samples, ceiling, th, S, slots=120):
         y = int((H - 2 * SS) * (1 - k / 3)) + SS
         d.line((0, y, W, y), fill=(gr, gg, gb, int(255 * ga * (1.4 if k == 0 else 0.8))), width=max(1, int(S * SS * 0.8)))
     if not samples:
-        return img.resize((w, h), Image.LANCZOS)
+        return img.reduce(SS)                                    # exact SS-fold box filter: same smoothness, far cheaper than LANCZOS
     pad_top = 6 * SS
     usable = H - pad_top - 3 * SS
     n = len(samples)
@@ -118,17 +142,17 @@ def speed_chart(w, h, samples, ceiling, th, S, slots=120):
     # area under the line, fading downwards
     area = Image.new("L", (W, H), 0)
     ImageDraw.Draw(area).polygon(pts + [(pts[-1][0], H), (pts[0][0], H)], fill=255)
-    fade = gk.vgrad(W, H, 110, 0, 1.0)
+    fade = _vgrad(W, H, 110, 0, 1.0)
     gk.over(img, th["accent"], ImageChops.multiply(area, fade))
     # the line itself, brighter toward "now"
     line = _line_mask((W, H), pts, max(2, int(2.2 * S * SS)))
     grad = Image.composite(Image.new("RGB", (W, H), th["accent"]), Image.new("RGB", (W, H), gk.shade(th["accent2"], -10)),
-                           gk.hgrad(W, H, 0, 255))
+                           _hgrad(W, H, 0, 255))
     layer = grad.convert("RGBA")
     layer.putalpha(line)
     img.alpha_composite(layer)
     _glow_dot(img, pts[-1][0], pts[-1][1], 3.2 * S * SS, th["accent"], th)
-    return img.resize((w, h), Image.LANCZOS)
+    return img.reduce(SS)                                    # exact SS-fold box filter: same smoothness, far cheaper than LANCZOS
 
 
 def sparkline(w, h, values, th, S, color=None, floor=None, ceiling=None):
@@ -141,7 +165,7 @@ def sparkline(w, h, values, th, S, color=None, floor=None, ceiling=None):
         d = ImageDraw.Draw(img)
         gr, gg, gb, ga = th["hair"]
         d.line((0, H // 2, W, H // 2), fill=(gr, gg, gb, int(255 * ga * 1.6)), width=max(1, int(S * SS)))
-        return img.resize((w, h), Image.LANCZOS)
+        return img.reduce(SS)                                    # exact SS-fold box filter: same smoothness, far cheaper than LANCZOS
     lo = min(vals) if floor is None else floor
     hi = max(vals) if ceiling is None else ceiling
     if hi - lo < 1e-9:
@@ -153,13 +177,13 @@ def sparkline(w, h, values, th, S, color=None, floor=None, ceiling=None):
     pts = [(x, min(H - pad, max(pad, y))) for x, y in pts]
     area = Image.new("L", (W, H), 0)
     ImageDraw.Draw(area).polygon(pts + [(pts[-1][0], H), (pts[0][0], H)], fill=255)
-    gk.over(img, color, ImageChops.multiply(area, gk.vgrad(W, H, 70, 0, 1.0)))
+    gk.over(img, color, ImageChops.multiply(area, _vgrad(W, H, 70, 0, 1.0)))
     line = _line_mask((W, H), pts, max(2, int(1.8 * S * SS)))
     layer = Image.new("RGBA", (W, H), tuple(color[:3]) + (0,))
     layer.putalpha(line)
     img.alpha_composite(layer)
     _glow_dot(img, pts[-1][0], pts[-1][1], 2.6 * S * SS, color, th)
-    return img.resize((w, h), Image.LANCZOS)
+    return img.reduce(SS)                                    # exact SS-fold box filter: same smoothness, far cheaper than LANCZOS
 
 
 # ---------------------------------------------------------------- storage vs quality
@@ -200,7 +224,7 @@ def tradeoff_chart(w, h, tr, pos_kbps, selected, hover, th, S):
     done = [p for p in curve if p[0] <= dot[0]] + [dot]
     area = Image.new("L", (W, H), 0)
     ImageDraw.Draw(area).polygon(done + [(dot[0], H - pad * SS), (done[0][0], H - pad * SS)], fill=255)
-    gk.over(img, th["accent"], ImageChops.multiply(area, gk.vgrad(W, H, 130, 0, 1.0)))
+    gk.over(img, th["accent"], ImageChops.multiply(area, _vgrad(W, H, 130, 0, 1.0)))
     # the whole curve faint, the part up to the dot in accent
     full = _line_mask((W, H), curve, max(2, int(2.0 * S * SS)))
     layer = Image.new("RGBA", (W, H), tuple(th["fg3"][:3]) + (0,))
@@ -208,7 +232,7 @@ def tradeoff_chart(w, h, tr, pos_kbps, selected, hover, th, S):
     img.alpha_composite(layer)
     part = _line_mask((W, H), done if len(done) > 1 else done * 2, max(2, int(2.6 * S * SS)))
     grad = Image.composite(Image.new("RGB", (W, H), th["accent"]), Image.new("RGB", (W, H), gk.shade(th["accent2"], -8)),
-                           gk.hgrad(W, H, 0, 255))
+                           _hgrad(W, H, 0, 255))
     lay = grad.convert("RGBA")
     lay.putalpha(part)
     img.alpha_composite(lay)
@@ -220,7 +244,5 @@ def tradeoff_chart(w, h, tr, pos_kbps, selected, hover, th, S):
         fill = tuple(th["accent"]) + (255,) if kbps <= pos_kbps + 1e-6 else tuple(th["fg3"]) + (255,)
         d.ellipse((x - r, y - r, x + r, y + r), fill=fill)
         d.ellipse((x - r * .45, y - r * .45, x + r * .45, y + r * .45), fill=(255, 255, 255, 230))
-        if hov and not on:
-            gk.over(img, th["accent"], gk.scaled(Image.new("L", img.size, 0), 0))
     _glow_dot(img, dot[0], dot[1], 6.4 * S * SS, th["accent"], th)
-    return img.resize((w, h), Image.LANCZOS)
+    return img.reduce(SS)                                    # exact SS-fold box filter: same smoothness, far cheaper than LANCZOS

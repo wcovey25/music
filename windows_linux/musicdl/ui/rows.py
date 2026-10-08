@@ -120,8 +120,9 @@ class Rows:
                     if len(self._plates) > 12:
                         self._plates.clear()
                     self._plates[key] = gk.panel_image(width, ph, p(16), th, a.S)
-                crop = self._plates[key].crop((0, v0 - py, width, v1 - py))
-                cv.create_image(x0, v0, anchor="nw", image=a.photo(("plate", id(g)), crop), tags=self.key)
+                d = a.D
+                crop = self._plates[key].crop((0, int(round((v0 - py) * d)), width * d, int(round((v1 - py) * d))))
+                a.put(x0, v0, a.photo(("plate", id(g)), crop, d), tags=self.key)
             for n, (row, ry, rh, sub) in enumerate(item["rows"]):
                 yy = base + ry
                 if yy + rh < y0 - p(2) or yy > y1 + p(2):
@@ -137,6 +138,7 @@ class Rows:
                                    fill=hx(th["fg3"]), tags=self.key)
         a.cover(x0 - p(4), y0, width + p(8), y1 - y0, p(ROW_SUB_H + 4), self.key)
         a.draw_scrollbar(self.key, self.key)
+        a.cv.tag_raise("spec")                                 # (a picture above the rows stays above the cover)
         a.cv.tag_raise("keep")
         a.cv.tag_raise("popup")
 
@@ -187,7 +189,7 @@ class Rows:
         on = bool(r["get"]())
         img = lambda t: a.cached(("sw", w, h, round(t * 5), enabled, a.name),
                                  lambda: gk.switch_image(w, h, round(t * 5) / 5, th, a.S, enabled))
-        item = a.cv.create_image(xr - w - g, cy - h / 2 - g, anchor="nw", image=img(1.0 if on else 0.0), tags=self.key)
+        item = a.put(xr - w - g, cy - h / 2 - g, img(1.0 if on else 0.0), tags=self.key)
 
         def toggle():
             new = not bool(r["get"]())
@@ -214,7 +216,7 @@ class Rows:
         idx = next((i for i, (v, _l) in enumerate(choices) if v == cur), 0)
         img = lambda t: a.cached(("seg", total, h, len(choices), round(t * 8), enabled, a.name),
                                  lambda: gk.segmented_image(total, h, len(choices), round(t * 8) / 8, th, a.S, enabled))
-        item = a.cv.create_image(x0 - g, cy - h / 2 - g, anchor="nw", image=img(idx), tags=self.key)
+        item = a.put(x0 - g, cy - h / 2 - g, img(idx), tags=self.key)
         labels = []
         for i, (v, lab) in enumerate(choices):
             labels.append(a.cv.create_text(x0 + seg_w * i + seg_w / 2, cy, text=lab, font=a.f_chip,
@@ -274,7 +276,7 @@ class Rows:
             a.close_popup()
             cap = a.cached(("fld", w, box[3] - box[1], a.name), lambda: gk.field_image(w, box[3] - box[1], True, th, a.S))
             g = int(round(8 * a.S))
-            a.cv.create_image(box[0] - g, box[1] - g, anchor="nw", image=cap, tags=(self.key, "entry"))
+            a.put(box[0] - g, box[1] - g, cap, tags=(self.key, "entry"))
             state = {"done": False}
 
             def commit(value):
@@ -303,7 +305,7 @@ class Rows:
         cur = r["get"]()
         label = next((lab for v, lab in choices if v == cur), cur or r.get("placeholder", "Choose…"))
         chev = a.cached(("chev", p(14), a.name), lambda: gk.chevron_icon(p(14), th["fg3"], "down"))
-        a.cv.create_image(xr - p(7), cy, image=chev, tags=self.key)
+        a.put(xr - p(7), cy, chev, "center", self.key)
         a.cv.create_text(xr - p(20), cy, text=gk.fit(str(label), a.f_body, w - p(24)), anchor="e", font=a.f_body,
                          fill=hx(th["accent"] if enabled else th["fg3"]), tags=self.key)
         box = (xr - w, cy - p(16), xr, cy + p(16))

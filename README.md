@@ -56,10 +56,13 @@ The Windows edition is being brought level with the macOS edition. Details and s
 | B | Search bar suggestions, close matches (**Choose…**), "match the source" quality in every mode | done |
 | C | Sound finishing (Advanced → Sound, Optimized → Polish), clean versions | done |
 | E | Protection: start-up file check and restore, read-only lock, settings and library backups, recovery `.bat` | done |
-| D | Interface: Live dashboard, artwork tilt, spectrum, Motion setting, first-run sheets, new icon, splash | **not started** — [`windows_linux/HANDOFF_D.md`](windows_linux/HANDOFF_D.md) |
+| D | Interface: Live dashboard, artwork tilt, spectrum, Motion setting, first-run sheets, new icon and `.ico`, new launch animation and sound | done |
 
-Checked: 518 offline tests pass on Linux (CPython 3.11, Tk 9.0), and the new screens were looked at headless (Xvfb),
-light and dark. **Not checked on a real Windows PC**: the Windows API readings (CPU, power, Reduce motion), the
-read-only lock, the recovery `.bat`, the Windows Security link, cleaner detection, starting by double-click, and the real
-services behind suggestions and close matches (all faked in tests). See the "Limits, honestly" notes in
+Checked: 559 offline tests pass on Linux (CPython 3.11, Tk 9.0); the new screens (launch, first-run sheets, Live
+during a run, spectrum, tilt, Settings) were looked at headless (Xvfb), light and dark, at the smallest window size; a
+200-song stress run stays flat. **Not checked on a real Windows PC**: the Windows API readings (CPU, power, Animation
+effects), the read-only lock, the recovery `.bat`, the Windows Security link, cleaner detection, starting by
+double-click, how the new interface looks and how smoothly it runs there (125–200 % scaling, slower computers), the
+taskbar `.ico`, the Controlled-folder-access check, and the real services behind suggestions and close matches (all
+faked in tests). Nobody has listened to the new start-up sound. See the "Limits, honestly" notes in
 [`windows_linux/README.md`](windows_linux/README.md).

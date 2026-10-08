@@ -6,8 +6,8 @@ backs up settings.json, and tells the person only when something needs a decisio
 group in Settings calls: lock the program files (Windows' read-only attribute), check now, copy the folders a cleaner or
 scanner should leave alone, and show the recovery script.
 
-Nothing here changes a system setting; the lock only concerns the app's own files. (The macOS edition does this in
-welcome.py, together with its first-run sheets; on Windows the first-run sheets are still to come — see PORT_NOTES.md.)
+Nothing here changes a system setting; the lock only concerns the app's own files. The first-run sheets are in
+welcome.py; until they have been seen, the "files changed" sheet waits (finish_welcome shows it), so two never stack.
 """
 import logging
 import os
@@ -62,7 +62,7 @@ class ProtectMixin:
             log.info("shield: put back %s", ", ".join(rep.restored))
         if rep.state == "attention":
             log.warning("shield: %s (changed %s, lost %s, %s)", rep.summary(), rep.changed, rep.lost, rep.runtime)
-            if not self.shield_noted and not self.sheet_state and not self.splashing:
+            if self.s.welcomed and not self.shield_noted and not self.sheet_state and not self.splashing:
                 self.shield_noted = True
                 self.shield_sheet(rep)
         self._settings_refresh()
@@ -155,3 +155,11 @@ class ProtectMixin:
         if self._cleaners is None:
             self._cleaners = platform_.cleaner_apps()
         return self._cleaners
+
+    def cleaner_note(self):
+        found = self.cleaners()
+        if not found:
+            return ""
+        names = ", ".join(found[:-1]) + (" and " if len(found) > 1 else "") + found[-1]
+        return (f"{names} {'is' if len(found) == 1 else 'are'} installed here. Programs like that can only be told to leave "
+                "an app alone in their own settings — add the folders from Settings › Protection to their exclusions.")

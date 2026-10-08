@@ -52,7 +52,7 @@ class SynthTests(unittest.TestCase):
             self.assertTrue(lo <= peak <= hi, f"{name} peak {peak:.2f}")
 
     def test_durations(self):
-        want = {"startup": (2.0, 4.0), "click": (0.03, 0.12), "nav": (0.15, 0.7), "complete": (2.0, 4.5)}
+        want = {"startup": (2.0, synth.STARTUP_SECONDS + 0.5), "click": (0.03, 0.12), "nav": (0.15, 0.7), "complete": (2.0, 4.5)}
         for name, (left, _r) in self.audio.items():
             secs = len(left) / 44100
             self.assertTrue(want[name][0] <= secs <= want[name][1], f"{name} {secs:.2f}s")

@@ -28,6 +28,7 @@ from .views_advanced import AdvancedMixin
 from .views_quality import QualityMixin
 from .views_settings import SettingsMixin
 from .views_source import SourceMixin
+from .welcome import WelcomeMixin
 
 log = logging.getLogger("musicdl")
 ROWS_MAX, ATTN_MAX, THUMBS_KEPT = 1500, 500, 300
@@ -56,6 +57,8 @@ class RunState:
         self.note = ""
         self.paused = None                  # set while the disk is full: {'free': bytes, 'need': bytes}
         self.pace = ""                      # set while the governor holds the run back ('Easing off while on battery — 2 at once')
+        self.pace_songs = 0                 # ... as numbers: the songs allowed at once, and whether that is the normal pace
+        self.pace_state = "normal"
         self.bursts = 0                     # songs finished with something new (the waveform ripples for each)
         self.seed = int(time.time() * 1000) & 0xFFFF            # gives every run its own waveform
         self.settings = None                # the settings the run started with (a chosen close match is fetched with them)
@@ -69,7 +72,8 @@ class RunState:
         return sum(1 for r in self.attn)
 
 
-class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin, ProtectMixin, SplashMixin, Shell):
+class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin, WelcomeMixin, ProtectMixin, SplashMixin,
+          Shell):
     TABS = (("format", "Format"), ("sound", "Sound"), ("extras", "Extras"), ("naming", "Naming"), ("live", "Live"),
             ("activity", "Activity"))
 
@@ -94,6 +98,7 @@ class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin
         self._init_activity()
         self._init_settings()
         self._init_protect()
+        self._init_welcome()
         self.root.after(40, self.begin)
 
     # ---------------------------------------------------------------- start-up
@@ -104,7 +109,7 @@ class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin
             return
         self.compute_layout()
         if self.s.splash:
-            self.run_splash(self.finish_start)
+            self.run_splash(self.finish_start)                  # (finish_start is its fallback: open without the show)
         else:
             self.cue("startup")
             self.finish_start()
@@ -112,9 +117,18 @@ class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin
     def finish_start(self):
         self.splashing = False
         self.paint(first=True)
+        self.root.after(2500, self.maybe_tune)
+        self.start_followups()
+
+    def start_followups(self):
+        """Warming up, the first-run sheets and the file check, once the window is up (from finish_start, or the launch
+        animation's hand-over, which doesn't go through finish_start)."""
+        if getattr(self, "_followups", False):
+            return
+        self._followups = True
         self.root.after(900, lambda: netio.prewarm(netio.SEARCH_HOSTS))     # the first search finds a connection waiting
         self.root.after(1500, lambda: threading.Thread(target=suggest.warm, name="suggest-warm", daemon=True).start())
-        self.root.after(2500, self.maybe_tune)
+        self.root.after(self.WELCOME_DELAY, self.maybe_welcome)               # (first run only)
         self.root.after(self.SHIELD_DELAY, self.start_shield)
 
     def maybe_tune(self):
@@ -162,8 +176,9 @@ class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin
         return scene
 
     # ---------------------------------------------------------------- painting
-    def paint(self, first=False):
-        if self.splashing:
+    def paint(self, first=False, staged=False):
+        """Draw the page. `staged` builds it hidden, behind the launch animation, which opens it when it is done."""
+        if self.splashing and not staged:
             return
         self.close_entries()
         self.close_popup()
@@ -171,11 +186,14 @@ class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin
         self.clear_regions(*EVERYTHING, "popup", "chrome")
         self.scrollers.clear()
         self.scene = self.render_scene()
-        self.cv.create_image(0, 0, anchor="nw", image=self.photo("scene", self.scene), tags="scene")
+        self.put(0, 0, self.scene_photo(self.scene), tags="scene")
         self.apply_window_theme()
         self.draw_page()
         self.redraw_sheet()
-        if first:
+        if staged:
+            self.tag_ui()
+            self.cv.itemconfigure("ui", state="hidden")
+        elif first:
             self.tag_ui()
             self.reveal("ui", dy=12, dur=0.45)
         self.root.after(350, self.prerender)
@@ -463,6 +481,7 @@ class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin
             r.active[ev["index"]] = dict(track=ev["track"], stage="Starting…", t0=time.monotonic())
         elif kind == "pace":
             r.pace = ev["text"] if ev.get("easing") else ""
+            r.pace_songs, r.pace_state = ev.get("songs") or 0, ev.get("state") or "normal"
         elif kind == "stage":
             a = r.active.get(ev["index"])
             if a:
@@ -561,6 +580,8 @@ class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin
         view = self.card_b_view()
         if view == "live":
             self.tick_live(now, dt)
+        elif view == "format":
+            self.tick_spec(now, dt)
         elif view == "activity":
             self.tick_activity(now, dt)
 
