@@ -25,8 +25,22 @@ class Row(dict):
         super().__init__(kind=kind, label=label, **kw)
 
 
+_WRAPS = {}
+
+
 def wrap(text, font, width, limit=3):
-    """Greedy word wrap (at most `limit` lines, the last one ellipsized)."""
+    """Greedy word wrap (at most `limit` lines, the last one ellipsized). Remembered: the page measures the same notes on
+    every scroll notch, and each measure is a call into Tk. A new font object (theme or scale change) has a new name."""
+    key = (str(text), str(font), width, limit)
+    got = _WRAPS.get(key)
+    if got is None:
+        if len(_WRAPS) >= 2048:
+            _WRAPS.clear()
+        got = _WRAPS[key] = tuple(_wrap(text, font, width, limit))
+    return list(got)
+
+
+def _wrap(text, font, width, limit):
     words, lines, cur = str(text).split(), [], ""
     for w in words:
         trial = (cur + " " + w).strip()
