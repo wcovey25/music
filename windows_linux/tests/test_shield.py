@@ -141,6 +141,37 @@ class SealTests(Tree):
         self.assertEqual(shield.check(None, self.sdir).state, "unsealed")
 
 
+class UpdateRepairTests(Tree):
+    def _update(self, rel, body):
+        with open(shield.resolve(self.root, rel), "w") as fh:
+            fh.write(body)
+
+    def test_a_later_start_keeps_the_updated_copy_of_a_file(self):
+        shield.check(self.root, self.sdir)                                  # first run: the old build is kept
+        self._update("musicdl/config.py", "A = 2\n")                       # an update changes two files and
+        self._update("musicdl/ui/app.py", "B = 3\n")
+        shield.seal(self.root)                                              # ships a new manifest
+        os.remove(shield.resolve(self.root, "musicdl/config.py"))           # a cleaner takes one during the update
+        first = shield.check(self.root, self.sdir)
+        self.assertEqual(first.lost, ["musicdl/config.py"])                 # its new copy was never kept: reported
+        os.remove(shield.resolve(self.root, "musicdl/ui/app.py"))           # later a cleaner takes the other updated file
+        second = shield.check(self.root, self.sdir)
+        self.assertEqual(second.restored, ["musicdl/ui/app.py"])            # ... and it comes back, new content
+        with open(shield.resolve(self.root, "musicdl/ui/app.py")) as fh:
+            self.assertEqual(fh.read(), "B = 3\n")
+
+    def test_a_changed_file_is_never_snapshotted(self):
+        shield.check(self.root, self.sdir)
+        self._update("musicdl/config.py", "A = 2\n")                       # an update ships a new manifest ...
+        shield.seal(self.root)
+        self._update("musicdl/ui/app.py", "B = 9\n")                       # ... and then a file is edited by hand
+        rep = shield.check(self.root, self.sdir)
+        self.assertEqual(rep.changed, ["musicdl/ui/app.py"])
+        self.assertNotEqual(shield.snapshot_info(self.sdir)["build"], shield.read_manifest(self.root)["build"])
+        with zipfile.ZipFile(os.path.join(self.sdir, shield.SNAPSHOT)) as z:
+            self.assertEqual(z.read("musicdl/ui/app.py"), b"B = 2\n")
+
+
 class LockTests(Tree):
     def test_lock_and_unlock(self):
         shield.check(self.root, self.sdir)

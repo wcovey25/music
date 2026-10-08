@@ -385,12 +385,19 @@ class Shell:
             except tk.TclError:
                 finished.append(key)
                 continue
+            except Exception:
+                log.exception("animation %s failed", key)              # one broken step must not stop the frame loop
+                finished.append(key)
+                continue
             if f >= 1.0:
                 finished.append(key)
         for key in finished:
             a = self.anims.pop(key, None)
             if a and a["done"]:
-                a["done"]()
+                try:
+                    a["done"]()
+                except Exception:
+                    log.exception("animation %s finished with an error", key)
         try:
             self.on_tick(now, dt)
         except tk.TclError:

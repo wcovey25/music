@@ -477,5 +477,47 @@ class ShieldGateTests(unittest.TestCase):
             self.assertEqual(p.shown, want)
 
 
+class FrameLoopTests(unittest.TestCase):
+    def _shell(self, root):
+        from musicdl.ui import shell as shellmod
+        sh = shellmod.Shell.__new__(shellmod.Shell)
+        sh.root, sh.alive, sh.anims, sh._last, sh.busy = root, True, {}, 0.0, False
+        sh.on_tick = lambda now, dt: None
+        sh._loop_job = None
+        return sh
+
+    def test_a_failing_animation_step_does_not_stop_the_loop(self):
+        root = _tk()
+        if root is None:
+            self.skipTest("no display")
+        try:
+            sh = self._shell(root)
+            ran = []
+            sh.anims["bad"] = dict(t0=time.time(), dur=10.0, update=lambda v: 1 / 0, ease=lambda f: f, done=None)
+            sh.anims["good"] = dict(t0=time.time(), dur=10.0, update=lambda v: ran.append(v), ease=lambda f: f, done=None)
+            sh._loop()
+            self.assertNotIn("bad", sh.anims)                                 # dropped, not kept failing every frame
+            self.assertIn("good", sh.anims)
+            self.assertIsNotNone(sh._loop_job)                                # the next frame is still scheduled
+            self.assertTrue(ran)
+        finally:
+            root.destroy()
+
+    def test_a_failing_finish_callback_does_not_stop_the_loop(self):
+        root = _tk()
+        if root is None:
+            self.skipTest("no display")
+        try:
+            sh = self._shell(root)
+
+            def boom():
+                raise RuntimeError("finish")
+            sh.anims["done"] = dict(t0=time.time() - 1, dur=0.001, update=lambda v: None, ease=lambda f: f, done=boom)
+            sh._loop()
+            self.assertIsNotNone(sh._loop_job)
+        finally:
+            root.destroy()
+
+
 if __name__ == "__main__":
     unittest.main()

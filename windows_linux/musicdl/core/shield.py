@@ -243,18 +243,31 @@ def snapshot_info(sdir):
 
 
 def take_snapshot(root, sdir, manifest):
-    """Keep a zip of the verified tree (and a copy of its manifest) in `sdir`."""
+    """Keep a zip of the verified tree (and a copy of its manifest) in `sdir`. A file the tree no longer has keeps its
+    copy from the old snapshot when that copy is what the new manifest expects, so an update that a cleaner interrupts
+    can still be repaired at the next start."""
     os.makedirs(sdir, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=sdir, suffix=".tmp")
     os.close(fd)
+    old = None
     try:
+        try:
+            old = zipfile.ZipFile(os.path.join(sdir, SNAPSHOT))
+        except (OSError, zipfile.BadZipFile):
+            old = None
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
             for rel in sorted(manifest["files"]):
                 path = resolve(root, rel)
                 if path and os.path.isfile(path):
                     z.write(path, rel)
+                elif path and old is not None and rel in old.namelist():
+                    data = old.read(rel)
+                    if hashlib.sha256(data).hexdigest() == manifest["files"][rel][1]:
+                        z.writestr(rel, data)
         os.replace(tmp, os.path.join(sdir, SNAPSHOT))
     finally:
+        if old is not None:
+            old.close()
         if os.path.exists(tmp):
             os.unlink(tmp)
     _write_json(os.path.join(sdir, SNAP_INFO), {"build": manifest["build"], "taken": int(time.time()),
@@ -345,7 +358,7 @@ def check(root, sdir, repair_missing=True):
             rep.sealed_now = True
     missing, changed = verify(root, manifest)
     if snap is None or snap.get("build") != manifest["build"]:
-        if not missing and not changed:
+        if not changed:                                                     # (missing files keep their old copy, see take_snapshot)
             take_snapshot(root, sdir, manifest)                             # a first run, or a real update: keep this one
             rep.updated = snap is not None
             snap = snapshot_info(sdir)

@@ -128,7 +128,7 @@ Diff lines are `diff | grep -c '^[<>]'` (mac vs this tree). "Newer" says whose s
 
 ## 3. What has not been tried on a real Windows PC
 
-Everything was tested on Linux (CPython 3.11, Tk 9.0) with 559 offline tests, and the window was looked at under Xvfb
+Everything was tested on Linux (CPython 3.11, Tk 9.0) with 563 offline tests, and the window was looked at under Xvfb
 (`tests/ui_shots.py`, light and dark). Not run on Windows:
 
 - the Windows API readings of A4 (CPU, memory, power, priorities, Reduce motion);
