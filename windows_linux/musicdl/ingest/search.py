@@ -29,7 +29,7 @@ def _track(d, album=None, service="search"):
 def search_tracks(query, ctx, limit=10):
     try:
         data = netio.get_json(f"{API}/search", params={"q": query, "limit": limit}, limiter=netio.DEEZER_LIMIT,
-                              stop=ctx.stop, search=True)
+                              stop=ctx.stop, search=True, hedge=True, ttl=120)
     except EngineError as e:
         raise ResolveError(f"Search is unavailable right now ({e})") from None
     return [d for d in (data or {}).get("data", []) if d.get("title")]
@@ -37,7 +37,7 @@ def search_tracks(query, ctx, limit=10):
 
 def album_collection(album_id, ctx, service="search"):
     try:
-        d = netio.get_json(f"{API}/album/{album_id}", limiter=netio.DEEZER_LIMIT, stop=ctx.stop)
+        d = netio.get_json(f"{API}/album/{album_id}", limiter=netio.DEEZER_LIMIT, stop=ctx.stop, hedge=True, ttl=300)
     except EngineError as e:
         raise ResolveError(f"Couldn’t load the album ({e})") from None
     if not d:
@@ -68,7 +68,7 @@ def resolve_text(text, ctx):
                               artwork=t.artwork, source=text)
     try:
         data = netio.get_json(f"{API}/search/album", params={"q": q, "limit": 5}, limiter=netio.DEEZER_LIMIT,
-                              stop=ctx.stop, search=True)
+                              stop=ctx.stop, search=True, hedge=True, ttl=120)
     except EngineError as e:
         raise ResolveError(f"Search is unavailable right now ({e})") from None
     albums = (data or {}).get("data") or []
@@ -131,19 +131,19 @@ def artist_radio(name, ctx, count=40, service="pandora"):
     """A radio-style queue: the artist's top songs, then top songs of similar artists, interleaved."""
     try:
         found = netio.get_json(f"{API}/search/artist", params={"q": name, "limit": 3}, limiter=netio.DEEZER_LIMIT,
-                               stop=ctx.stop, search=True)
+                               stop=ctx.stop, search=True, hedge=True, ttl=300)
         artists = [a for a in (found or {}).get("data", []) if sim(a.get("name", ""), name) >= 0.7]
         if not artists:
             return []
         seed = artists[0]
         top = (netio.get_json(f"{API}/artist/{seed['id']}/top", params={"limit": max(10, count // 2)},
-                              limiter=netio.DEEZER_LIMIT, stop=ctx.stop) or {}).get("data", [])
+                              limiter=netio.DEEZER_LIMIT, stop=ctx.stop, hedge=True, ttl=300) or {}).get("data", [])
         related = (netio.get_json(f"{API}/artist/{seed['id']}/related", params={"limit": 8},
-                                  limiter=netio.DEEZER_LIMIT, stop=ctx.stop) or {}).get("data", [])
+                                  limiter=netio.DEEZER_LIMIT, stop=ctx.stop, hedge=True, ttl=300) or {}).get("data", [])
         lists = [[_track(d, service=service) for d in top]]
         for a in related[:6]:
             tops = (netio.get_json(f"{API}/artist/{a['id']}/top", params={"limit": 5}, limiter=netio.DEEZER_LIMIT,
-                                   stop=ctx.stop) or {}).get("data", [])
+                                   stop=ctx.stop, hedge=True, ttl=300) or {}).get("data", [])
             lists.append([_track(d, service=service) for d in tops])
     except EngineError as e:
         raise ResolveError(f"Couldn’t build the station ({e})") from None

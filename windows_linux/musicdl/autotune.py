@@ -1,9 +1,11 @@
 """
 autotune.py — look at this computer and this connection once in a while, then pick how many songs to process at once.
 
-Runs in the background shortly after start-up when "Automatic" is on (at most once a week). Measures CPU cores and
-RAM (encoding is CPU-bound), latency to archive.org, and download speed over a few parallel streams from Cloudflare's
-public speed-test endpoint, and turns that into a parallel count and a retry count.
+Runs in the background shortly after start-up when "Automatic" is on (at most once a week). Scans the hardware (cores,
+RAM: see resources.py), measures latency to archive.org and download speed over a few parallel streams from
+Cloudflare's public speed-test endpoint, and turns that into the number of songs a run starts with and a retry count.
+During a long run resources.Governor then moves that number up or down by what it sees. If the scan or the plan ever
+fails, the older rule below (half the cores, ~10 Mbps a song, at most 8) is used instead.
 """
 import os
 import socket
@@ -12,7 +14,7 @@ import time
 
 import requests
 
-from . import platform_
+from . import platform_, resources
 
 SPEED_URLS = ("https://speed.cloudflare.com/__down?bytes=25000000", "https://speed.cloudflare.com/__down?bytes=10000000")
 MAX_AUTO_PARALLEL = 8            # remote services throttle heavy users; the manual setting goes higher
@@ -21,7 +23,10 @@ STALE_AFTER = 7 * 86400
 
 
 def detect_hardware():
-    return {"cores": os.cpu_count() or 2, "ram_gb": platform_.total_ram_gb()}
+    try:
+        return resources.detect().info()
+    except Exception:
+        return {"cores": os.cpu_count() or 2, "ram_gb": platform_.total_ram_gb()}
 
 
 def measure_latency(host="archive.org", port=443, tries=3):
@@ -66,13 +71,16 @@ def measure_throughput(seconds=3.0, streams=3):
 
 def recommend(hw, net):
     """Measurements -> settings. Conservative when something could not be measured."""
-    cores, ram = hw["cores"], hw.get("ram_gb")
     mbps, lat = net.get("mbps"), net.get("latency_ms")
-    by_cpu = max(1, cores // 2)
-    if ram is not None and ram < 4:
-        by_cpu = min(by_cpu, 2)
-    by_net = 2 if mbps is None else max(1, int(mbps // MBPS_PER_STREAM))
-    parallel = max(1, min(by_cpu, by_net, MAX_AUTO_PARALLEL))
+    try:
+        parallel = resources.plan(resources.Hardware.from_info(hw), mbps).start
+    except Exception:                                        # the older rule, kept as the fallback
+        cores, ram = int(hw.get("cores") or 2), hw.get("ram_gb")
+        by_cpu = max(1, cores // 2)
+        if ram is not None and ram < 4:
+            by_cpu = min(by_cpu, 2)
+        by_net = 2 if mbps is None else max(1, int(mbps // MBPS_PER_STREAM))
+        parallel = max(1, min(by_cpu, by_net, MAX_AUTO_PARALLEL))
     flaky = lat is None or lat > 200 or (mbps is not None and mbps < 5)
     return {"parallel": parallel, "retries": 3 if flaky else 2}
 
@@ -93,10 +101,11 @@ def due(settings):
 
 
 def describe(info):
-    """Short human line for Settings: '8 cores · 16 GB · 94 Mbps · 21 ms'."""
+    """Short human line for Settings: '8 cores · 16 GB · 94 Mbps · 21 ms' ('12 cores (4+8)' when there are kinds)."""
     if not info:
         return ""
-    bits = [f"{info.get('cores', '?')} cores"]
+    tiers = info.get("tiers") or []
+    bits = [f"{info.get('cores', '?')} cores" + (f" ({'+'.join(str(n) for _, n in tiers)})" if len(tiers) > 1 else "")]
     if info.get("ram_gb"):
         bits.append(f"{info['ram_gb']:g} GB")
     if info.get("mbps"):

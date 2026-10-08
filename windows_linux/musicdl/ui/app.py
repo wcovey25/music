@@ -53,6 +53,7 @@ class RunState:
         self.finished = False
         self.note = ""
         self.paused = None                  # set while the disk is full: {'free': bytes, 'need': bytes}
+        self.pace = ""                      # set while the governor holds the run back ('Easing off while on battery — 2 at once')
         self.bursts = 0                     # songs finished with something new (the waveform ripples for each)
         self.seed = int(time.time() * 1000) & 0xFFFF            # gives every run its own waveform
 
@@ -438,6 +439,8 @@ class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin
             r.todo, r.planned = ev["todo"], True
         elif kind == "begin":
             r.active[ev["index"]] = dict(track=ev["track"], stage="Starting…", t0=time.monotonic())
+        elif kind == "pace":
+            r.pace = ev["text"] if ev.get("easing") else ""
         elif kind == "stage":
             a = r.active.get(ev["index"])
             if a:

@@ -88,7 +88,7 @@ def _itunes(ids, country, songs_of=False):
     if songs_of:
         params.update(entity="song", limit=25)
     try:
-        data = netio.get_json("https://itunes.apple.com/lookup", params=params, limiter=netio.ITUNES_LIMIT)
+        data = netio.get_json("https://itunes.apple.com/lookup", params=params, limiter=netio.ITUNES_LIMIT, ttl=600)
     except EngineError as e:
         raise ResolveError(f"Couldn’t reach Apple ({e})") from None
     return (data or {}).get("results", [])

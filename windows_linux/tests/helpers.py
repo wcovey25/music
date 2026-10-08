@@ -18,6 +18,7 @@ if ROOT not in sys.path:
 
 HOME = tempfile.mkdtemp(prefix="musicdl_test_home_")
 os.environ["MUSICDL_HOME"] = HOME                 # settings / secrets / cache never touch the real profile
+os.environ["MUSICDL_NO_PREWARM"] = "1"            # a job never opens connections to the real services ahead of time
 
 from musicdl import platform_  # noqa: E402
 

@@ -331,7 +331,7 @@ class SourceMixin:
             first = next(iter(r.active.values()))
             song = gk.fit(first["track"].label(), self.f_semi, ra["room"])
             more = len(r.active) - 1
-            stage = first["stage"] + (f"  ·  +{more} more" if more else "")
+            stage = first["stage"] + (f"  ·  +{more} more" if more else "") + (f"  ·  {r.pace}" if r.pace else "")
         else:
             song, stage = r.phase, ""
         self._set("song", song)

@@ -121,6 +121,194 @@ def process_rss_mb():
     return None
 
 
+# ---------------------------------------------------------------- the machine and how hard it is working
+# The same functions as the macOS edition (hardware, cpu_ticks, cpu_cores, core_tiers, thermal_state, power_source,
+# compute_priority, thread_priority, reduce_motion). Windows answers through kernel32/ntdll with ctypes; elsewhere each
+# returns its "can't say" value (None, or a neutral default) so resources.py simply does without.
+
+def _cpu_name():
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as k:
+            return " ".join(str(winreg.QueryValueEx(k, "ProcessorNameString")[0]).split()) or None
+    except Exception:
+        return None
+
+
+def physical_cores():
+    """Physical CPU cores (not hardware threads) on Windows, from GetLogicalProcessorInformationEx; None elsewhere or
+    when it can't be read."""
+    if not IS_WINDOWS:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.windll.kernel32
+        k32.GetLogicalProcessorInformationEx.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
+        size = wintypes.DWORD(0)
+        k32.GetLogicalProcessorInformationEx(0, None, ctypes.byref(size))           # RelationProcessorCore: ask the size
+        if not size.value:
+            return None
+        buf = ctypes.create_string_buffer(size.value)
+        if not k32.GetLogicalProcessorInformationEx(0, buf, ctypes.byref(size)):
+            return None
+        return count_core_records(buf.raw[:size.value]) or None
+    except Exception:
+        return None
+
+
+def count_core_records(raw):
+    """Number of RelationProcessorCore records in a SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX buffer (each record starts
+    with its Relationship and its Size, two little-endian DWORDs)."""
+    import struct
+    n, off = 0, 0
+    while off + 8 <= len(raw):
+        rel, size = struct.unpack_from("<II", raw, off)
+        if size < 8:
+            break
+        n += rel == 0
+        off += size
+    return n
+
+
+def hardware():
+    """What this computer is: {'chip', 'logical', 'tiers': [(name, cores)], 'ram_gb'}. Windows lists one kind of core
+    (the physical cores); hybrid chips are not told apart."""
+    logical = os.cpu_count() or 1
+    cores = physical_cores() or max(1, logical // 2 if logical >= 4 else logical)
+    return {"chip": (_cpu_name() if IS_WINDOWS else None) or "CPU", "logical": logical, "tiers": [("Cores", cores)],
+            "ram_gb": total_ram_gb()}
+
+
+def _filetime(ft):
+    return (ft.dwHighDateTime << 32) | ft.dwLowDateTime
+
+
+def cpu_ticks():
+    """(busy, total) CPU time of the whole machine since boot, in 100 ns units (GetSystemTimes: kernel time includes
+    idle time), or None. busy/total of the difference between two readings is how loaded the CPUs were in between."""
+    if not IS_WINDOWS:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        idle, kernel, user = wintypes.FILETIME(), wintypes.FILETIME(), wintypes.FILETIME()
+        if not ctypes.windll.kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user)):
+            return None
+        total = _filetime(kernel) + _filetime(user)
+        return total - _filetime(idle), total
+    except Exception:
+        return None
+
+
+def cpu_cores():
+    """[(busy, total), ...] per logical CPU (of the current processor group) in the units of cpu_ticks(), or None.
+    From NtQuerySystemInformation(SystemProcessorPerformanceInformation), the source Task Manager uses."""
+    if not IS_WINDOWS:
+        return None
+    try:
+        import ctypes
+
+        class SPPI(ctypes.Structure):
+            _fields_ = [("IdleTime", ctypes.c_longlong), ("KernelTime", ctypes.c_longlong),
+                        ("UserTime", ctypes.c_longlong), ("DpcTime", ctypes.c_longlong),
+                        ("InterruptTime", ctypes.c_longlong), ("InterruptCount", ctypes.c_ulong)]
+        n = max(1, os.cpu_count() or 1)
+        arr = (SPPI * n)()
+        got = ctypes.c_ulong(0)
+        if ctypes.windll.ntdll.NtQuerySystemInformation(8, ctypes.byref(arr), ctypes.sizeof(arr), ctypes.byref(got)) != 0:
+            return None
+        out = []
+        for p in arr[:max(1, got.value // ctypes.sizeof(SPPI))]:
+            total = p.KernelTime + p.UserTime
+            out.append((total - p.IdleTime, total))
+        return out
+    except Exception:
+        return None
+
+
+def core_tiers():
+    """Kinds of core, fastest first, as [(name, [logical cpu numbers])]: None — Windows is read as one kind."""
+    return None
+
+
+def thermal_state():
+    """0 nominal … 3 critical. Windows gives an ordinary program no heat reading, so this is always 0 ('nominal'):
+    the governor never slows down for heat on Windows (see the README)."""
+    return 0
+
+
+def power_source():
+    """{'battery': running on battery, 'low_power': battery saver is on} from GetSystemPowerStatus; a computer that
+    can't say counts as plugged in."""
+    out = {"battery": False, "low_power": False}
+    if not IS_WINDOWS:
+        return out
+    try:
+        import ctypes
+
+        class SPS(ctypes.Structure):
+            _fields_ = [("ACLineStatus", ctypes.c_ubyte), ("BatteryFlag", ctypes.c_ubyte),
+                        ("BatteryLifePercent", ctypes.c_ubyte), ("SystemStatusFlag", ctypes.c_ubyte),
+                        ("BatteryLifeTime", ctypes.c_ulong), ("BatteryFullLifeTime", ctypes.c_ulong)]
+        st = SPS()
+        if ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(st)):
+            out.update(read_power_status(st.ACLineStatus, st.BatteryFlag, st.SystemStatusFlag))
+    except Exception:
+        pass
+    return out
+
+
+def read_power_status(ac_line, battery_flag, status_flag):
+    """SYSTEM_POWER_STATUS fields -> {'battery', 'low_power'}. ACLineStatus 0 = on battery (255 = unknown);
+    BatteryFlag 128 = no battery; SystemStatusFlag 1 = battery saver on."""
+    no_battery = battery_flag == 128
+    return {"battery": ac_line == 0 and not no_battery, "low_power": status_flag == 1}
+
+
+BELOW_NORMAL_PRIORITY_CLASS, IDLE_PRIORITY_CLASS = 0x00004000, 0x00000040
+
+
+def compute_priority(level):
+    """(command prefix, extra creationflags) to start a heavy child process (ffmpeg) at `level`: 0 normal, 1 reduced,
+    2 minimal (Windows: below-normal / idle priority class)."""
+    if not IS_WINDOWS or level <= 0:
+        return [], 0
+    return [], IDLE_PRIORITY_CLASS if level >= 2 else BELOW_NORMAL_PRIORITY_CLASS
+
+
+_THREAD_PRIORITY = {0: 0, 1: -1, 2: -2}          # THREAD_PRIORITY_NORMAL, _BELOW_NORMAL, _LOWEST
+
+
+def thread_priority(level):
+    """Give the calling thread the priority for `level` (0 normal, 1 reduced, 2 minimal); True when applied."""
+    if not IS_WINDOWS:
+        return False
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        k32.GetCurrentThread.restype = ctypes.c_void_p
+        k32.SetThreadPriority.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        return bool(k32.SetThreadPriority(k32.GetCurrentThread(), _THREAD_PRIORITY.get(level, 0)))
+    except Exception:
+        return False
+
+
+def reduce_motion():
+    """True when Windows is set to show no animations (Settings → Accessibility → Visual effects → Animation effects
+    off: SPI_GETCLIENTAREAANIMATION). The app then starts with Motion: Reduced."""
+    if not IS_WINDOWS:
+        return False
+    try:
+        import ctypes
+        on = ctypes.c_int(1)
+        if ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(on), 0):
+            return not on.value
+    except Exception:
+        pass
+    return False
+
+
 def extra_bin_dirs():
     """Folders worth searching for command-line tools when the launcher's PATH is minimal."""
     if IS_WINDOWS:                                       # where winget puts command-line tools (before the next sign-in)

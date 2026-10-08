@@ -14,7 +14,8 @@ For every Track it makes sure there is a correct, tagged file in the output fold
   * new songs are fetched from the exact recording a link points at, or found on archive.org / YouTube and
     accepted only if their length matches the song (that is what keeps a 75-minute podcast out of the library);
   * audio is encoded (or copied untouched) to the chosen format and tagged; artwork and lyrics are added;
-  * songs run in parallel; shared rate limiters keep every web service happy.
+  * songs run in parallel — how many at once is planned from the hardware scan and, on a long run, adjusted while it
+    goes by a governor (resources.py); shared rate limiters keep every web service happy.
 
 Nothing here knows about windows: progress is reported through an `emit(dict)` callback with events
 phase / plan / begin / stage / result.
@@ -25,9 +26,10 @@ import shutil
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
+from .. import platform_, resources
 from ..audio import sampler, transcode
 from ..config import FORMATS, OutFmt, size_kbps_of
 from ..meta import lyrics as lyrics_mod
@@ -117,6 +119,8 @@ class Job:
         self.fmt = settings.out_format()
         self.capped = bool(getattr(settings, "capped", False))   # Optimized mode: never bigger than the source deserves
         self.no_lossless = 0                                      # songs written lossy although lossless was chosen
+        self.budget = resources.Budget.unlimited()                # songs at once / encodes at once (set up for real by _run_pool)
+        self.governor = None                                      # watches CPU, power and the network during a long run
         self.target_q = quality.target(self.fmt)
         self.template = settings.name_template()
         self.lib = None
@@ -142,6 +146,14 @@ class Job:
     def _stage(self, rc, text):
         self.emit({"type": "stage", "index": rc.index, "text": text})
 
+    @contextmanager
+    def _cpu(self):
+        """A place among the CPU-heavy steps (see Budget.cpu); Stopped if the run is stopped while waiting for one."""
+        with self.budget.cpu(self.stop) as lvl:
+            if lvl is None:
+                raise Stopped()
+            yield lvl
+
     def is_low(self, kbps):
         """Below the user's quality floor? A 6% margin so a 122 kbps VBR file isn't 'low' against a 128 floor."""
         floor = self.st.min_kbps
@@ -155,6 +167,7 @@ class Job:
         os.makedirs(self.tmp_root, exist_ok=True)
         self.lib = Library(self.outdir)
         netio.reset_health()                                      # a host that failed in an earlier run gets a fresh start
+        netio.prewarm(netio.RUN_HOSTS)                            # (connections to the lookup services, opened while the plan is made)
         T.start()
         try:
             self._say("Looking up song details…")
@@ -204,14 +217,27 @@ class Job:
         catalog.mb_prefetch(self.lib, [t.mbid for t in self.tracks], self.stop, self._say)
 
     def _run_pool(self, todo):
-        n = max(1, int(self.st.effective_parallel()))
+        """Work through `todo` with a few worker threads. How many songs are in flight at once is not the number of
+        threads: it is the size of the song gate (Budget.songs), which a long run's Governor changes while it runs
+        (more while the machine and the network have room, fewer on battery, on errors or when sites push back)."""
+        st = self.st
+        pl = resources.plan(resources.detect(), (st.auto_info or {}).get("mbps"))
+        wanted = max(1, int(st.effective_parallel()))
+        manual = not (st.auto and st.auto_parallel)                  # a number the user chose is a ceiling
+        governed = len(todo) >= resources.MIN_GOVERNED
+        cap = (wanted if manual else max(pl.ceiling, wanted)) if governed else min(wanted, max(1, len(todo)))
+        start = min(cap, wanted)
+        self.budget = budget = resources.Budget(pl, songs=start)
+        scouts = _Scouts(self, todo, budget)
+        queue, qlock, taken = iter(todo), threading.Lock(), [0]
 
-        scouts = _Scouts(self, todo, n)
+        if governed:
+            self.governor = resources.Governor(budget, cap=cap, start=start, manual=manual,
+                                               link_mbps=(st.auto_info or {}).get("mbps"),
+                                               backlog=lambda: len(todo) - taken[0], emit=self.emit)
 
-        def task(rc, plan):
-            if self.stop.is_set():
-                return
-            scouts.advance()                                   # this song is taken: the scouts may look one further ahead
+        def song(rc, plan):
+            scouts.advance()                                       # this song is taken: the scouts may look one further ahead
             self.emit({"type": "begin", "index": rc.index, "track": rc.track})
             res = self._work(rc, plan)
             rc.release()
@@ -219,18 +245,43 @@ class Job:
                 T.song_done()
                 self._finish(rc, res)
 
-        pool = ThreadPoolExecutor(max_workers=n, thread_name_prefix="song")
-        scouts.start()
-        try:
-            futures = [pool.submit(task, rc, p) for rc, p in todo]
-            for f in futures:
+        def worker():
+            while not self.stop.is_set():
+                place = budget.songs.acquire(self.stop)            # waits while the governor has the run held to fewer songs
+                if place is None:
+                    return
                 try:
-                    f.result()
-                except Exception:
-                    log.exception("worker crashed")
+                    with qlock:                                    # songs are taken in order, by whoever gets a place
+                        item = next(queue, None)
+                        taken[0] += item is not None
+                    if item is None:
+                        return
+                    lvl = budget.level
+                    if lvl:
+                        platform_.thread_priority(lvl)             # on battery this thread works at a lower priority
+                    try:
+                        song(*item)
+                    except Exception:
+                        log.exception("worker crashed")
+                    finally:
+                        if lvl:
+                            platform_.thread_priority(0)
+                finally:
+                    budget.songs.release(place)
+
+        workers = [threading.Thread(target=worker, name="song", daemon=True) for _ in range(cap)]
+        scouts.start()
+        if self.governor:
+            self.governor.start()
+        try:
+            for w in workers:
+                w.start()
+            for w in workers:
+                w.join()
         finally:
             scouts.close()
-            pool.shutdown(wait=True, cancel_futures=True)
+            if self.governor:
+                self.governor.close()
 
     def _finish(self, rc, res):
         if not res.path:
@@ -909,6 +960,7 @@ class Job:
                 if sources.is_permanent(e):                      # gone, private, forbidden: asking again cannot help
                     cand["dead"] = True
                     break
+                T.error()                                        # a flaky failure: the governor counts these
                 if self.stop.wait(1.5 * (attempt + 1)):
                     raise Stopped() from None
         if not got:
@@ -925,7 +977,8 @@ class Job:
         honest_lossless = lossless_src and not cand.get("ripped")      # a WAV made from a video's sound is not lossless
         if self.capped and honest_lossless:
             self._stage(rc, "Checking source quality")
-            smp = sampler.sample(src, self.stop)                       # a FLAC made from a 128 kbps MP3 is a big MP3
+            with self._cpu():
+                smp = sampler.sample(src, self.stop)                   # a FLAC made from a 128 kbps MP3 is a big MP3
             if not smp.lossless:
                 log.info("%s: lossless file with a %d Hz edge — really ~%d kbps", cand.get("title"), smp.cutoff, smp.q)
                 honest_lossless, cand["lossless"], cand["kbps"], est_kbps = False, False, smp.q, smp.q
@@ -936,9 +989,9 @@ class Job:
         action = transcode.plan(family, raw_kbps, fmt, bits)
         self._stage(rc, "Encoding" if action == "encode" else "Saving")
         dst = os.path.join(tmpdir, f"out{rc.index}_{abs(hash(cand['id'])) % 10**6}{fmt.ext}")
-        threads = max(1, (os.cpu_count() or 2) // max(1, int(self.st.effective_parallel())))
         try:
-            transcode.encode(src, dst, fmt, action, threads, self.stop, lossless_src)
+            with self._cpu():                                          # only so many encodes at once, the extra ones gently
+                transcode.encode(src, dst, fmt, action, self.budget.threads(), self.stop, lossless_src)
         except Stopped:
             raise
         except Exception as e:
@@ -1045,15 +1098,16 @@ class _Scouts:
     """Looks a few songs ahead of the workers. Searching is mostly waiting for the network; downloading and encoding
     are bandwidth and CPU. While the workers do the second, a couple of threads already do the first for the songs that
     come next, so the two overlap. A song is only scouted once (a worker that gets there first does it itself and the
-    scout moves on), and the scouts never run more than `reach` songs ahead."""
+    scout moves on), and the scouts never run more than twice the songs-at-once ahead (the governor changes that
+    number during a long run)."""
 
-    def __init__(self, job, todo, workers):
-        self.job, self.todo, self.next = job, todo, 0
-        self.credit = threading.Semaphore(max(2, workers * 2))
-        self.lock = threading.Lock()
+    def __init__(self, job, todo, budget):
+        self.job, self.todo, self.budget = job, todo, budget
+        self.next = self.taken = 0
+        self.cond = threading.Condition()
         self.closing = threading.Event()
         self.threads = [threading.Thread(target=self._loop, name="scout", daemon=True)
-                        for _ in range(min(3, max(1, workers)))]
+                        for _ in range(min(3, max(1, budget.songs.limit)))]
 
     def start(self):
         for t in self.threads:
@@ -1061,21 +1115,29 @@ class _Scouts:
 
     def advance(self):
         """A worker has taken a song."""
-        self.credit.release()
+        with self.cond:
+            self.taken += 1
+            self.cond.notify_all()
 
     def close(self):
         self.closing.set()
+        with self.cond:
+            self.cond.notify_all()
         for t in self.threads:
             t.join(timeout=5)
+
+    def _over(self):
+        return self.closing.is_set() or self.job.stop.is_set()
 
     def _loop(self):
         job = self.job
         try:
-            while not self.closing.is_set() and not job.stop.is_set():
-                if not self.credit.acquire(timeout=0.3):
-                    continue
-                with self.lock:
-                    if self.next >= len(self.todo):
+            while not self._over():
+                with self.cond:
+                    while not self._over() and (self.next - self.taken >= max(2, self.budget.songs.limit * 2)
+                                                or not self.budget.scouts_on.is_set()):
+                        self.cond.wait(0.3)
+                    if self._over() or self.next >= len(self.todo):
                         return
                     rc, plan = self.todo[self.next]
                     self.next += 1
@@ -1126,6 +1188,8 @@ def run_headless(tracks, outdir, settings, stop=None, printer=print, ai=None):
             printer(f"Disk full — paused ({ev['free'] // 2 ** 20} MB free). It continues by itself when there is room.")
         elif t == "resumed":
             printer("Disk space is back — continuing.")
+        elif t == "pace" and ev["state"] != "normal":
+            printer(ev["text"])
         elif t == "result":
             r = ev["result"]
             state["done"] += 1

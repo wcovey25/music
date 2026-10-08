@@ -176,7 +176,7 @@ def _archive_docs(rc, stop):
             data = netio.get_json("https://archive.org/advancedsearch.php",
                                   params={"q": q, "fl[]": ["identifier", "title", "creator"],
                                           "sort[]": "downloads desc", "rows": "24", "output": "json"},
-                                  limiter=netio.ARCHIVE_LIMIT, stop=stop)
+                                  limiter=netio.ARCHIVE_LIMIT, stop=stop, ttl=300)
         except EngineError as e:
             log.info("archive search failed for %s: %s", rc.track.label(), e)
             return []
@@ -202,7 +202,7 @@ def _archive_search(rc, stop, fits, deep):
     def listing(d):
         try:
             return netio.get_json(f"https://archive.org/metadata/{quote(d['identifier'])}",
-                                  limiter=netio.ARCHIVE_LIMIT, stop=stop, retries=2)
+                                  limiter=netio.ARCHIVE_LIMIT, stop=stop, retries=2, ttl=600)
         except EngineError:
             return None
 
