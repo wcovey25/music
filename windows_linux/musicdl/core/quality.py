@@ -5,6 +5,8 @@ Everything is expressed as "MP3-equivalent kbps" (the same scale sources.py uses
 A file's *delivered* quality is the lower of what its container can hold and what its source was: a 192 kbps MP3 made
 from a lossless original delivers 192; a FLAC made from a 128 kbps video delivers 128.
 """
+from dataclasses import replace
+
 from ..config import FORMATS, OutFmt
 
 LOSSLESS = 1411                  # same number sources.py gives lossless candidates
@@ -77,7 +79,7 @@ def lossy_tier(q, bitrates):
     return ok[0] if ok else max(bitrates)
 
 
-# ---------------------------------------------------------------- the source cap (Optimized mode)
+# ---------------------------------------------------------------- the source cap ("match the source", every mode)
 
 LOSSY_CEILING = {"mp3": 320, "aac": 256}     # the most a lossy stand-in for a lossless choice is ever written at
 UNKNOWN_Q = 192                               # a lossy source of unknown bitrate: assume this much (rounds to a tier)
@@ -86,11 +88,13 @@ UNKNOWN_Q = 192                               # a lossy source of unknown bitrat
 def fit(fmt, lossless, q):
     """The format a song is really written in: what was chosen, but never more than its source can fill.
 
-    * lossless source  -> exactly the format chosen (FLAC/ALAC stay FLAC/ALAC; MP3/AAC stay as chosen)
+    * lossless source  -> exactly the format chosen (FLAC/ALAC stay FLAC/ALAC; MP3/AAC stay as chosen); fit_pcm then
+                          keeps its sample rate and bit depth honest
     * lossy source     -> a chosen lossy format keeps its bitrate only if the source has that much to give, otherwise
                           the smallest bitrate that holds everything the source has; a chosen *lossless* format becomes
                           MP3 (for FLAC) or AAC (for ALAC) at that bitrate, because a lossless copy of lossy sound is
                           just a much bigger file.
+    The sample rate chosen is kept, and so are custom flags — unless the codec changes, when they would no longer fit.
     `q` is the source quality in MP3-equivalent kbps (0 = unknown). Returns `fmt` itself when nothing changes."""
     if lossless:
         return fmt
@@ -103,4 +107,42 @@ def fit(fmt, lossless, q):
     kbps = min(top, lossy_tier((q or UNKNOWN_Q) / weight, bitrates))
     if base == fmt.key and kbps == fmt.kbps:
         return fmt
-    return OutFmt(base, kbps=kbps, bit_depth=16)
+    return OutFmt(base, kbps=kbps, sample_rate=fmt.sample_rate, bit_depth=16,
+                  flags=list(fmt.flags) if base == fmt.key else [])
+
+
+def fit_pcm(fmt, rate=0, bits=0, held_rate=0, held_bits=0):
+    """`fmt` with its sample rate and bit depth never above what the source really holds. A 96 kHz / 24-bit file made
+    from 44.1 kHz / 16-bit audio is the same sound in a bigger file, so it is not written.
+
+    `rate` / `bits` are what the file says (0 = unknown, then nothing is capped); `held_rate` / `held_bits` what a
+    listen found in it (0 = the same as it says). A rate the source already has is 0 ("keep"), which also lets the
+    audio be copied as it is. Bit depth only applies to lossless formats. Returns `fmt` itself when nothing changes."""
+    out = fmt
+    cap = held_rate or rate
+    if cap:
+        wanted = fmt.sample_rate or rate or cap
+        if min(wanted, cap) != wanted:
+            out = replace(out, sample_rate=0 if cap >= rate else cap)
+    if fmt.lossless:
+        cap = held_bits or bits
+        if cap:
+            wanted = fmt.bit_depth or bits or cap
+            if min(wanted, cap) != wanted:
+                out = replace(out, bit_depth=0 if cap >= bits else cap)
+    return out
+
+
+def match_note(asked, fitted, chosen, rate=0, bits=0, held_rate=0, held_bits=0):
+    """A few words for the Activity list when a song was written below what was chosen because the source holds less
+    ('' when it was not). `asked` is the format before fit_pcm, `fitted` after, `chosen` the one the user picked."""
+    parts = []
+    if not chosen.lossless and fitted.key == chosen.key and fitted.kbps < chosen.kbps:
+        parts.append(fitted.label)
+    cap = held_rate or rate
+    if cap and fitted.sample_rate != asked.sample_rate:
+        parts.append(f"{cap / 1000:g} kHz")
+    cap = held_bits or bits
+    if cap and fitted.lossless and fitted.bit_depth != asked.bit_depth:
+        parts.append(f"{cap}-bit")
+    return ("Matched to source · " + " · ".join(parts)) if parts else ""

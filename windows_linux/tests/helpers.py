@@ -21,6 +21,19 @@ os.environ["MUSICDL_HOME"] = HOME                 # settings / secrets / cache n
 os.environ["MUSICDL_NO_PREWARM"] = "1"            # a job never opens connections to the real services ahead of time
 
 from musicdl import platform_  # noqa: E402
+from musicdl.core import sources as _sources  # noqa: E402
+
+_real_ydl = _sources._ydl
+
+
+class _NoSearch:
+    """yt-dlp searches answer 'nothing found' in tests (the close-match ladder would otherwise reach YouTube)."""
+
+    def extract_info(self, query, download=False):
+        return {"entries": []}
+
+
+_sources._ydl = lambda kind: _NoSearch() if kind == "search" else _real_ydl(kind)
 
 FFMPEG = platform_.find_tool("ffmpeg")
 NO_WINDOW = platform_.NO_WINDOW

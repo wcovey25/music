@@ -78,6 +78,7 @@ class Shell:
     def render_scene(self): return gk.make_background(self.W, self.H, self.th, self.S)
     def paint(self): ...
     def on_tick(self, now, dt): ...
+    def on_sheet(self): ...                   # a question just opened or closed
     def on_escape(self):
         if self.sheet_state:
             self._sheet_pick(self.sheet_state["default"])
@@ -122,6 +123,11 @@ class Shell:
             ph = self.cache[key] = ImageTk.PhotoImage(make())
         return ph
 
+    def put(self, x, y, ph, anchor="nw", tags=()):
+        """create_image for a photo made by photo/cached (the macOS edition places denser pictures here; Windows draws
+        one pixel per point, so this is create_image as it is)."""
+        return self.cv.create_image(x, y, anchor=anchor, image=ph, tags=tags)
+
     def box(self, r):
         p = self.p
         x, y, w, h = r
@@ -156,7 +162,7 @@ class Shell:
     def _find(self, x, y):
         sheet = [r for r in self.regions if r["group"] == "sheet"]
         pop = sheet or [r for r in self.regions if r["group"] == "popup"]
-        pool = pop if pop else self.regions
+        pool = pop if pop and (sheet or not (self.popup_state or {}).get("quiet")) else self.regions
         for r in reversed(pool):
             x0, y0, x1, y1 = r["box"]
             if x0 <= x <= x1 and y0 <= y <= y1 and r["enabled"]():
@@ -179,8 +185,10 @@ class Shell:
     def _on_press(self, e):
         if self.popup_state and not any(r["group"] == "popup" and r["box"][0] <= e.x <= r["box"][2]
                                         and r["box"][1] <= e.y <= r["box"][3] for r in self.regions):
+            quiet = self.popup_state.get("quiet")
             self.close_popup()
-            return
+            if not quiet:                                  # a menu swallows the click that closes it; a suggestion list does not
+                return
         self.cv.focus_set()
         r = self._find(e.x, e.y)
         self._pressed = r
@@ -599,8 +607,13 @@ class Shell:
         return rec["var"].get() if rec else default
 
     # ---------------------------------------------------------------- popup menu
-    def open_popup(self, anchor, items, current, on_pick, width=None, row_h=36, max_rows=7):
-        """Floating menu under (or over) the `anchor` box (canvas px). items = [(value, label)]."""
+    def open_popup(self, anchor, items, current, on_pick, width=None, row_h=36, max_rows=7, quiet=False):
+        """Floating menu under (or over) the `anchor` box (canvas px). items = [(value, label)]. A label can also be a
+        dict(title, detail, tag) for a two-line row with a kind tag at its right.
+
+        `quiet` is for a list that comes and goes while you type (suggestions): no sound, the rest of the window
+        stays usable, a click elsewhere closes it and still counts, and Up/Down/Return work through popup_move and
+        popup_accept."""
         self.close_popup()
         p, th, cv = self.p, self.th, self.cv
         rows = len(items)
@@ -614,11 +627,12 @@ class Shell:
         g = int(round(22 * self.S))
         img = self.cached(("popup", w, h, self.name), lambda: gk.popup_image(w, h, p(14), th, self.S))
         st = dict(items=items, current=current, on_pick=on_pick, box=(x, y, x + w, y + h), row_h=p(row_h), off=0,
-                  shown=shown, hover=None, scroll=True if rows > shown else None, w=w)
+                  shown=shown, hover=None, scroll=True if rows > shown else None, w=w, quiet=quiet, sel=None)
         self.popup_state = st
         cv.create_image(x - g, y - g, anchor="nw", image=img, tags="popup")
         self._popup_rows()
-        self.cue("nav")
+        if not quiet:
+            self.cue("nav")
 
     def _popup_rows(self):
         st = self.popup_state
@@ -632,19 +646,25 @@ class Shell:
         hl = hx(mix(fill, th["fg"], 0.10))
         total = len(st["items"])
         st["off"] = max(0, min(st["off"], total - st["shown"]))
+        if st["quiet"]:
+            self.region((x0, y0, x1, y1), group="popup", sound=None)       # the padding is part of the list
         for i in range(st["shown"]):
             idx = st["off"] + i
             value, label = st["items"][idx]
             ry = y0 + p(6) + i * st["row_h"]
-            sel = value == st["current"]
+            rich = isinstance(label, dict)
+            sel = (idx == st["sel"]) if rich else value == st["current"]
             rect = cv.create_rectangle(x0 + p(6), ry, x1 - p(6), ry + st["row_h"], fill=hl if sel else "", outline="",
                                        tags=("popup", "popup_rows"))
-            cv.create_text(x0 + p(18), ry + st["row_h"] / 2, text=gk.fit(str(label), self.f_body, st["w"] - p(60)),
-                           anchor="w", font=self.f_body, fill=hx(th["accent"] if sel else th["fg"]),
-                           tags=("popup", "popup_rows"))
-            if sel:
-                cv.create_text(x1 - p(18), ry + st["row_h"] / 2, text="✓", anchor="e", font=self.f_semi,
-                               fill=hx(th["accent"]), tags=("popup", "popup_rows"))
+            if rich:
+                self._rich_row(label, x0, x1, ry, st, sel)
+            else:
+                cv.create_text(x0 + p(18), ry + st["row_h"] / 2, text=gk.fit(str(label), self.f_body, st["w"] - p(60)),
+                               anchor="w", font=self.f_body, fill=hx(th["accent"] if sel else th["fg"]),
+                               tags=("popup", "popup_rows"))
+                if sel:
+                    cv.create_text(x1 - p(18), ry + st["row_h"] / 2, text="✓", anchor="e", font=self.f_semi,
+                                   fill=hx(th["accent"]), tags=("popup", "popup_rows"))
 
             def hover(on, rect=rect, sel=sel):
                 cv.itemconfigure(rect, fill=hl if (on or sel) else "")
@@ -652,6 +672,45 @@ class Shell:
             self.region((x0 + p(6), ry, x1 - p(6), ry + st["row_h"]), cb=lambda v=value: self._popup_pick(v),
                         group="popup", hover=hover, sound="click")
         cv.tag_raise("popup")
+
+    def _rich_row(self, label, x0, x1, ry, st, lit):
+        """Title over a quieter line of detail, the kind of thing at the right ('Song', 'Album' …)."""
+        cv, th, p = self.cv, self.th, self.p
+        tag = label.get("tag", "")
+        tag_w = (self.f_tiny.measure(tag) + p(14)) if tag else 0
+        room = st["w"] - p(36) - tag_w
+        mid = ry + st["row_h"] / 2
+        two = bool(label.get("detail"))
+        cv.create_text(x0 + p(18), mid - (p(9) if two else 0), text=gk.fit(label.get("title", ""), self.f_body, room),
+                       anchor="w", font=self.f_body, fill=hx(th["fg"]), tags=("popup", "popup_rows"))
+        if two:
+            cv.create_text(x0 + p(18), mid + p(10), text=gk.fit(label["detail"], self.f_small, room), anchor="w",
+                           font=self.f_small, fill=hx(th["fg3"]), tags=("popup", "popup_rows"))
+        if tag:
+            cv.create_text(x1 - p(18), mid, text=tag, anchor="e", font=self.f_tiny, fill=hx(th["accent"] if lit else th["fg3"]),
+                           tags=("popup", "popup_rows"))
+
+    def popup_move(self, step):
+        """Up/Down in an open list: moves the highlight (wrapping), scrolling it into view. False when no list is open."""
+        st = self.popup_state
+        if not st or not st["items"]:
+            return False
+        n = len(st["items"])
+        st["sel"] = (0 if step > 0 else n - 1) if st["sel"] is None else (st["sel"] + step) % n
+        if st["sel"] < st["off"]:
+            st["off"] = st["sel"]
+        elif st["sel"] >= st["off"] + st["shown"]:
+            st["off"] = st["sel"] - st["shown"] + 1
+        self._popup_rows()
+        return True
+
+    def popup_accept(self):
+        """Return in an open list: picks the highlighted row. False when there is none (the key is then not ours)."""
+        st = self.popup_state
+        if not st or st["sel"] is None:
+            return False
+        self._popup_pick(st["items"][st["sel"]][0])
+        return True
 
     def _popup_pick(self, value):
         st = self.popup_state
@@ -666,18 +725,21 @@ class Shell:
             self.clear_regions("popup")
 
     # ---------------------------------------------------------------- question sheet
-    def open_sheet(self, title, paragraphs, buttons, on_pick, default=None):
+    def open_sheet(self, title, paragraphs, buttons, on_pick, default=None, follow=False):
         """A modal question over a dimmed window. buttons = [(key, label, kind)], laid out left to right; Esc picks
-        `default` (a key). Nothing underneath can be clicked until one is chosen."""
+        `default` (a key). Nothing underneath can be clicked until one is chosen. `follow=True` is for a sheet that
+        answers another one: it appears in place, without the dimming and sliding in again."""
         self.close_popup()
         self.close_entries()
         self.sheet_state = dict(title=title, paras=list(paragraphs), buttons=list(buttons), on_pick=on_pick,
-                                default=default or buttons[-1][0], fresh=True)
+                                default=default or buttons[-1][0], fresh=not follow)
+        self.on_sheet()
         self.redraw_sheet()
 
     def close_sheet(self):
         if self.sheet_state:
             self.sheet_state = None
+            self.on_sheet()
             self.stop_anim("sheet-dim")
             self.cv.delete("sheet", "sheet_panel")
             self.clear_regions("sheet")

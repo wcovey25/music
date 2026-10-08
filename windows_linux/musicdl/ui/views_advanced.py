@@ -1,10 +1,11 @@
 """
-views_advanced.py — Advanced mode: the tab bar (Format · Extras · Naming · Live · Activity), the rows behind the first
-three tabs, and the real-time telemetry dashboard (ETA, progress, live speed graph, searches/min, API latency).
+views_advanced.py — Advanced mode: the tab bar (Format · Sound · Extras · Naming · Live · Activity), the rows behind the
+first four tabs, and the real-time telemetry dashboard (ETA, progress, live speed graph, searches/min, API latency).
 """
 import time
 from collections import deque
 
+from ..audio import process
 from ..config import DEFAULT_TEMPLATE, FORMATS, estimate_mb, size_kbps_of
 from ..core.models import Track
 from ..meta import naming
@@ -14,7 +15,8 @@ from . import glass as gk
 from .glass import hx
 from .rows import Group, Row
 
-TABS = (("format", "Format"), ("extras", "Extras"), ("naming", "Naming"), ("live", "Live"), ("activity", "Activity"))
+TABS = (("format", "Format"), ("sound", "Sound"), ("extras", "Extras"), ("naming", "Naming"), ("live", "Live"),
+        ("activity", "Activity"))
 STYLES = (("{title} - {artist}", "Title - Artist"), ("{artist} - {title}", "Artist - Title"),
           ("{artist}/{title}", "Artist / Title"), ("{artist}/{album}/{track} {title}", "Artist / Album / 01 Title"))
 SAMPLE = Track("Skyfall", "Adele", album="Skyfall", year="2012", track_no=1, genre="Pop")
@@ -40,7 +42,7 @@ class AdvancedMixin:
             return
         cv, p = self.cv, self.p
         bx, by, bw, bh = self.rB
-        w = min(bw - 56, 470)
+        w = min(bw - 56, 540)
         keys = [k for k, _ in TABS]
         self.segmented("tabs", (p(bx + 28), p(by + 16), p(bx + 28 + w), p(by + 16 + 34)), [lab for _k, lab in TABS],
                        keys.index(self.tab), self.pick_tab, "B")
@@ -127,6 +129,8 @@ class AdvancedMixin:
                         sub="Resample every song, or keep what the source has", min=62),
                     Row("segment", "Bit depth", choices=[(16, "16-bit"), (24, "24-bit")], get=lambda: s.bit_depth,
                         set=put("bit_depth", then=self.refresh_estimate), show=lossless, refresh=True),
+                    Row("switch", "Match the source", get=lambda: s.match_source, set=put("match_source"),
+                        sub="Never write more than the source holds: no padded bitrate, fake lossless or fake hi-res"),
                     Row("info", "Estimated size", get=self.size_line),
                 ]),
                 Group("Encoder", [
@@ -135,6 +139,8 @@ class AdvancedMixin:
                 ], note="Example: -compression_level 8 for smaller FLAC files. A wrong flag makes ffmpeg refuse the "
                         "file, and the song will show up under Needs attention."),
             ]
+        if tab == "sound":
+            return self.sound_groups(put)
         if tab == "extras":
             return [Group("Added to every song", [
                 Row("switch", "Embed artwork", sub="Cover art inside each file", get=lambda: s.embed_art,
@@ -158,6 +164,48 @@ class AdvancedMixin:
                                                                     or DEFAULT_TEMPLATE, s.out_format().ext)),
         ], note="Fields: {title} {artist} {album} {year} {track} {disc} {genre}. Songs already saved under a "
                 "different name are treated as new ones.")]
+
+    def sound_groups(self, put):
+        """The Sound tab: finishing touches done while each song is saved (audio/process.py)."""
+        s = self.s
+        snap = lambda choices, value: min(choices, key=lambda c: abs(c[0] - value))[0]
+        on = lambda: s.level or s.trim or s.fade != "off" or s.enhance != "off" or s.dynamics != "off"
+
+        def preset(key):
+            process.apply_profile(s, key)
+            s.clamp()
+            s.save()
+        return [
+            Group("Quick setup", [
+                Row("popup", "Preset", sub="One tap sets everything below", choices=[(k, v[0]) for k, v in process.PROFILES.items()],
+                    get=lambda: process.profile_of(s), set=preset, refresh=True, width=190, placeholder="Custom"),
+            ]),
+            Group("Volume", [
+                Row("switch", "Even out the volume", sub="Every song is brought to the same loudness, so a playlist plays "
+                    "at one level", get=lambda: s.level, set=put("level"), refresh=True),
+                Row("segment", "Loudness", sub="How loud, measured the way streaming services do (LUFS)",
+                    choices=[(v, lab) for v, lab in process.LEVELS], get=lambda: snap(process.LEVELS, s.level_target),
+                    set=put("level_target"), refresh=True, min=78, show=lambda: s.level),
+            ]),
+            Group("Silence and fades", [
+                Row("switch", "Trim silence", sub="Cut the dead air before a song starts and after it ends",
+                    get=lambda: s.trim, set=put("trim"), refresh=True),
+                Row("segment", "Sensitivity", sub="How quiet counts as silence",
+                    choices=[(v, lab) for v, lab in process.TRIMS], get=lambda: snap(process.TRIMS, s.trim_db),
+                    set=put("trim_db"), refresh=True, min=78, show=lambda: s.trim),
+                Row("segment", "Fades", sub="A soft fade-in and fade-out on every song", choices=list(process.FADE_CHOICES),
+                    get=lambda: s.fade, set=put("fade"), refresh=True, min=62),
+            ]),
+            Group("Sound", [
+                Row("popup", "Enhance", sub="A gentle EQ shape", choices=list(process.ENHANCE_CHOICES),
+                    get=lambda: s.enhance, set=put("enhance"), refresh=True, width=160),
+                Row("segment", "Dynamics", sub="Evens out loud and quiet moments inside a song",
+                    choices=list(process.DYNAMICS_CHOICES), get=lambda: s.dynamics, set=put("dynamics"), refresh=True,
+                    min=62),
+            ], note=lambda: ("These are applied while each song is saved, and a song is encoded afresh instead of "
+                             "copied. Songs already in the folder are left as they are.") if on() else
+                    "Nothing here is switched on: every song is saved exactly as it was downloaded."),
+        ]
 
     # ---------------------------------------------------------------- live dashboard
     def draw_live(self):

@@ -5,6 +5,7 @@ of these, so there is exactly one place that knows how a switch, a segmented con
     Group("Title", [Row("switch", "Embed artwork", get=lambda: ..., set=lambda v: ...), ...])
 
 Row kinds: switch · segment · stepper · text · password · popup · action · info
+Group(title, rows, note="" | callable) — the note sits under the group.
 Common keys: sub (second line, str or callable), show (callable -> bool), enabled (callable -> bool),
              refresh=True (redraw the list after the value changes, for rows that other rows depend on)
 """
@@ -72,8 +73,9 @@ class Rows:
                 item["rows"].append((r, y, h, sub))
                 y += h
             item["plate_h"] = y - item["plate_y"]
-            if g.note:
-                lines = wrap(g.note, a.f_tiny, width - p(2 * PAD))
+            note = g.note() if callable(g.note) else g.note        # (a note may depend on what is switched on)
+            if note:
+                lines = wrap(note, a.f_tiny, width - p(2 * PAD))
                 item["note"] = lines
                 y += p(8) + len(lines) * p(16)
             y += p(GROUP_GAP)
@@ -104,7 +106,7 @@ class Rows:
             base = y0 - off
             if g.title:
                 ty = base + item["title_y"]
-                if top < ty < bot:
+                if y0 - p(2) <= ty + p(6) and ty + p(TITLE_H) - p(9) <= y1:       # (a title never paints outside the card)
                     cv.create_text(x0 + p(PAD), ty + p(TITLE_H) - p(9), text=g.title.upper(), anchor="sw",
                                    font=a.f_tiny, fill=hx(th["fg3"]), tags=self.key)
             py = base + item["plate_y"]

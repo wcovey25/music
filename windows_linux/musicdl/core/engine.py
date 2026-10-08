@@ -30,14 +30,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from .. import platform_, resources
-from ..audio import sampler, transcode
+from ..audio import process, sampler, transcode
 from ..config import FORMATS, OutFmt, size_kbps_of
 from ..meta import lyrics as lyrics_mod
 from ..meta import naming
 from ..meta.artwork import GOOD_SIDE, cover_side, prepare, sized
 from ..meta.tags import Tagset, extract_cover, read_info, write as write_tags
 from ..telemetry import T
-from . import catalog, disk, netio, quality, sources
+from . import catalog, closematch, disk, netio, quality, sources
 from .dedupe import FolderIndex
 from .disk import DiskGuard
 from .library import Library
@@ -75,6 +75,7 @@ class Ctx:
     raw: dict = field(default_factory=dict)        # cached search results per source
     cat: dict = None                 # catalogue lookup
     cat_t: float = 0.0               # when it was made (monotonic)
+    clean: bool = False              # the clean edit is wanted (the setting), not the explicit original
     cover: tuple = None              # (jpeg, thumb, source) once found
     cover_done: bool = False
     src_cover: bytes = None          # the picture inside the downloaded file, a fallback when no service has one
@@ -117,11 +118,15 @@ class Job:
         self.disk = DiskGuard(outdir, self.stop, self.emit)       # a full disk pauses the run instead of failing songs
         self._covers = netio.Memo(48)                             # prepared artwork by URL: an album's art is made once
         self.fmt = settings.out_format()
-        self.capped = bool(getattr(settings, "capped", False))   # Optimized mode: never bigger than the source deserves
+        self.capped = bool(getattr(settings, "capped", False))   # never bigger than the source deserves (every mode)
         self.no_lossless = 0                                      # songs written lossy although lossless was chosen
+        self.matched = 0                                          # songs written below what was chosen: that is all the source has
+        self.close_mode = getattr(settings, "close_match", "ask")    # what to do with a song that has no exact match
+        self.close_taken = 0                                      # songs saved from a close match (close_match = auto)
         self.budget = resources.Budget.unlimited()                # songs at once / encodes at once (set up for real by _run_pool)
         self.governor = None                                      # watches CPU, power and the network during a long run
         self.target_q = quality.target(self.fmt)
+        self.spec = settings.audio_spec() if hasattr(settings, "audio_spec") else None   # level / trim / enhance, or None
         self.template = settings.name_template()
         self.lib = None
         self._index = None
@@ -132,7 +137,8 @@ class Job:
         self._lock = threading.Lock()
         self.tol = settings.tolerance / 100.0
         self.crit = [settings.tolerance, settings.min_kbps if settings.replace_low else 0, bool(settings.use_art()),
-                     bool(settings.verify), self.fmt.signature(), bool(settings.use_tags()), bool(settings.use_lyrics())]
+                     bool(settings.verify), self.fmt.signature(), bool(settings.use_tags()), bool(settings.use_lyrics()),
+                     self.capped]
 
     # ---------------------------------------------------------------- helpers
 
@@ -187,20 +193,39 @@ class Job:
         finally:
             self.lib.forget_old()
             self.lib.save(force=True)
+            self._backup_library()
             shutil.rmtree(self.tmp_root, ignore_errors=True)
             T.stop()
             sources.drop_all_ydl()
             netio.close_thread_session()
         return self.counts
 
+    def _backup_library(self):
+        """Keep a copy of the folder's record (the last three different ones) next to the settings backups."""
+        try:
+            from . import shield
+            shield.backup_library(self.outdir, shield.shield_dir(platform_.config_dir()))
+        except Exception:
+            log.debug("library backup failed", exc_info=True)
+
     def summary(self):
-        """One sentence about what Optimized mode did differently from what was chosen ('' when nothing)."""
+        """What the run did differently from what was chosen, in sentences ('' when nothing)."""
+        out = []
         n = self.no_lossless
-        if not n:
-            return ""
-        lossy = FORMATS["aac" if self.fmt.key == "alac" else "mp3"]["label"]
-        return (f"{n} song{'s' if n != 1 else ''} had no lossless version to download, so "
-                f"{'they were' if n != 1 else 'it was'} saved as {lossy} instead of {self.fmt.label}.")
+        if n:
+            lossy = FORMATS["aac" if self.fmt.key == "alac" else "mp3"]["label"]
+            out.append(f"{n} song{'s' if n != 1 else ''} had no lossless version to download, so "
+                       f"{'they were' if n != 1 else 'it was'} saved as {lossy} instead of {self.fmt.label}.")
+        m = self.matched
+        if m:
+            out.append(f"{m} song{'s' if m != 1 else ''} came from {'sources' if m != 1 else 'a source'} that holds "
+                       f"less than {self.fmt.label}, so {'they were' if m != 1 else 'it was'} saved at the quality "
+                       f"the source has instead of being padded.")
+        c = self.close_taken
+        if c:
+            out.append(f"{c} song{'s' if c != 1 else ''} had no exact match, so {'they were' if c != 1 else 'it was'} "
+                       f"saved from the closest one found (the note beside each says how it differs).")
+        return " ".join(out)
 
     def _prepare(self):
         """Fix up track details before anything is searched: AI repair (optional), MusicBrainz lengths."""
@@ -298,6 +323,7 @@ class Job:
         rc = Ctx(index=i, track=track, title=core_title(track.title), artist=first_artist(track.artist))
         rc.refs = ([m["len"] / 1000.0] if m and m.get("len") else []) + ([float(track.duration)] if track.duration else [])
         rc.track_toks, rc.artist_toks = toks(rc.title), toks(rc.artist)
+        rc.clean = bool(getattr(self.st, "clean_versions", False))
         self._cached_details(track)
         self._set_path(rc)
         return rc
@@ -355,6 +381,8 @@ class Job:
         scan    no network: used while classifying existing files, so a song with no known length is only
                 trusted up to SCAN_UNKNOWN_SECONDS and anything longer is double-checked by a worker
         """
+        if rc.track.extra.get("picked"):                          # the user chose this recording: its length is their call
+            return seconds >= 5
         refs = list(rc.refs)
         if deep or (not refs and not scan and not rc.track.direct):
             refs += self._ext_refs(rc)
@@ -503,7 +531,7 @@ class Job:
         if not st.verify:
             return self._ok_plan(rc, info, False, False)
         reasons = []
-        if not self.fits(rc, info.seconds, scan=True):
+        if not self.fits(rc, info.seconds + float(rec.get("removed", 0) or 0), scan=True):     # (trimmed silence counts)
             reasons.append("length")
         low = self.is_low(info.quality_kbps)
         if low and st.replace_low and rec.get("upgrade_tried", 0) < st.min_kbps:
@@ -710,8 +738,43 @@ class Job:
             if chosen:
                 break
         if chosen is None:
-            return self._no_luck(rc, old, plan, need_better, too_long, failed)
+            res = self._no_luck(rc, old, plan, need_better, too_long, failed)
+            if res.status in ("no-file", "bad-length"):
+                return self._look_around(rc, plan, old, tmpdir, res)
+            return res
         return self._install(rc, plan, old, *chosen)
+
+    def _look_around(self, rc, plan, old, tmpdir, res):
+        """Nothing matched exactly: search around the song (see closematch). With 'auto', a close match that differs only
+        in length is saved straight away; otherwise the options travel with the result for the user to choose from."""
+        if self.close_mode == "skip" or rc.track.direct or not self.st.youtube:
+            return res
+        self._stage(rc, "Looking for close matches")
+        try:
+            refs = list(rc.refs) + list(self._ext_refs(rc) or [])
+            options = closematch.around(rc, self.stop, refs, self.tol)
+        except Stopped:
+            raise
+        except Exception as e:                                    # never let the extra search turn a miss into an error
+            log.info("close-match search failed for %s: %s", rc.track.label(), e)
+            return res
+        if not options:
+            return res
+        if self.close_mode == "auto":
+            for opt in (o for o in options if o["safe"]):
+                self._check()
+                fmt = self._fmt_for(opt, False)
+                out = self._try(rc, opt, tmpdir, fmt, lenient=True)
+                if isinstance(out, tuple):
+                    saved = self._install(rc, plan, old, *out[:3], opt, out[3])
+                    saved.note = " · ".join(x for x in (saved.note, "Close match: " + ", ".join(opt["why"])) if x)
+                    with self._lock:
+                        self.close_taken += 1
+                    return saved
+        n = len(options)
+        res.close = options
+        res.note = f"{res.note} · {n} close option{'' if n == 1 else 's'}"
+        return res
 
     def _fmt_for(self, cand, upgrade):
         """The format to write a candidate in, judged from what the search says about it (_try judges again from the
@@ -779,7 +842,7 @@ class Job:
                         track_no=t.track_no, disc_no=t.disc_no, mbid=t.mbid, isrc=t.isrc,
                         lyrics=lyr.plain if lyr else "", source=cand["source"], src_kbps=q,
                         album_artist=t.album_artist, track_total=t.track_total, disc_total=t.disc_total, date=t.date,
-                        explicit=t.explicit, compilation=t.compilation, label=t.record_label)
+                        explicit=self._explicit(rc, cand), compilation=t.compilation, label=t.record_label)
             write_tags(path, ts, cover[0] if cover else None)
         elif cover:
             write_tags(path, Tagset(), cover[0], merge=True)
@@ -792,7 +855,9 @@ class Job:
             self._write_lrc(rc, lyr.synced)
         info2 = read_info(rc.final) or info
         low = self.is_low(q)
+        fx = rc.raw.pop("fx", None)
         self._record(rc, info2, low=low, nocover=cover is None and bool(st.use_art()), details_tried=int(time.time()),
+                     removed=round(fx.removed, 1) if fx is not None else 0,
                      **({"cover_tried": int(time.time())} if cover is None else {}))
         replaced = self._remove_replaced(rc, plan) if plan.kind == "upgrade" else ""
         if plan.kind == "upgrade":
@@ -806,10 +871,35 @@ class Job:
                     self.no_lossless += 1
                 note = f"{note} · " if note else ""
                 note += f"No lossless source · {fmt.label}"
+        matched = rc.raw.pop("match_note", "")
+        if matched and not (self.fmt.lossless and not fmt.lossless):
+            with self._lock:
+                self.matched += 1
+            note = f"{note} · {matched}" if note else matched
+        finished = rc.raw.pop("fx_note", "")
+        if finished:
+            note = f"{note} · {finished}" if note else finished
+        version = rc.raw.pop("version_note", "")
+        if version:
+            note = f"{note} · {version}" if note else version
         return Result("upgraded" if old else "ok", t.title, t.artist, note=note,
                       kbps=info2.kbps, src_kbps=q, seconds=info2.seconds, cover=cover is not None,
                       thumb=cover[1] if cover else None, source=cand["source"], low_quality=low,
                       no_cover=cover is None and bool(st.use_art()), size=info2.size, lyrics=bool(lyr and lyr.plain))
+
+    def _explicit(self, rc, cand):
+        """The explicit tag for this file: 1 explicit, 2 clean, 0 nothing to say. It follows what the file most likely
+        is — the upload's own title first, then what the catalogue says about the song — never the setting alone, so an
+        explicit file is never labelled clean (or the other way round)."""
+        said = sources.version_of(rc, cand.get("title", ""))
+        if said == "clean":
+            return 2
+        if said == "explicit":
+            return 1
+        known = int(rc.track.explicit or 0)
+        if known == 1 and rc.clean:
+            rc.raw["version_note"] = "No clean version found"
+        return known
 
     def _remove_replaced(self, rc, plan):
         """The better version is saved and verified; take the old copy away (unless the new file *is* the old path).
@@ -939,9 +1029,10 @@ class Job:
 
     # ---------------------------------------------------------------- fetching, encoding and verifying one candidate
 
-    def _try(self, rc, cand, tmpdir, fmt=None):
+    def _try(self, rc, cand, tmpdir, fmt=None, lenient=False):
         """Download + encode + verify one candidate. Returns (output path, FileInfo, quality, format written) | 'length' |
-        None. In Optimized mode the source is sampled first and the format follows what it really is (quality.fit)."""
+        None. In Optimized mode the source is sampled first and the format follows what it really is (quality.fit).
+        `lenient`: a close match is being tried, so the length rule is only that the file is as long as it was listed."""
         fmt = fmt or self.fmt
         retries = max(0, int(self.st.effective_retries()))
         got = None
@@ -975,23 +1066,43 @@ class Job:
         family = transcode.codec_family(os.path.splitext(src)[1], hint)
         lossless_src = cand["lossless"] or family in transcode.LOSSLESS_CODECS
         honest_lossless = lossless_src and not cand.get("ripped")      # a WAV made from a video's sound is not lossless
-        if self.capped and honest_lossless:
-            self._stage(rc, "Checking source quality")
-            with self._cpu():
-                smp = sampler.sample(src, self.stop)                   # a FLAC made from a 128 kbps MP3 is a big MP3
-            if not smp.lossless:
-                log.info("%s: lossless file with a %d Hz edge — really ~%d kbps", cand.get("title"), smp.cutoff, smp.q)
-                honest_lossless, cand["lossless"], cand["kbps"], est_kbps = False, False, smp.q, smp.q
+        rate, bits = transcode.probe_pcm(src, family)                  # what the file says it holds
+        if lossless_src and not bits:
+            bits = transcode.bit_depth_of(src)
+        file_kbps = est_kbps                                           # what the container carries, whatever it holds
+        rc.raw["match_note"] = ""
         if self.capped:
-            fmt = quality.fit(self.fmt, honest_lossless, sources.LOSSLESS_KBPS if honest_lossless else cand["kbps"])
-        raw_kbps = int(est_kbps / sources.CODEC_WEIGHT.get(family, 1.0)) if est_kbps and not lossless_src else 0
-        bits = transcode.bit_depth_of(src) if lossless_src else 16
-        action = transcode.plan(family, raw_kbps, fmt, bits)
+            smp = None
+            if honest_lossless or (not lossless_src and est_kbps >= sampler.LISTEN_ABOVE):
+                self._stage(rc, "Checking source quality")
+                with self._cpu():
+                    smp = sampler.sample(src, self.stop)               # a FLAC made from a 128 kbps MP3 is a big MP3
+            if smp is not None and not smp.lossless:
+                if honest_lossless:
+                    log.info("%s: lossless file with a %d Hz edge — really ~%d kbps", cand.get("title"), smp.cutoff, smp.q)
+                    honest_lossless, cand["lossless"], cand["kbps"], est_kbps = False, False, smp.q, smp.q
+                elif smp.q * (1.4 if family == "mp3" else 1.8) < est_kbps:     # a "320 kbps" file with a 128 kbps edge
+                    log.info("%s: claims ~%d kbps but has a %d Hz edge — really ~%d kbps", cand.get("title"), est_kbps,
+                             smp.cutoff, smp.q)
+                    cand["kbps"], est_kbps = smp.q, smp.q
+            held_rate = held_bits = 0
+            if honest_lossless and (rate >= 88200 or bits > 16):       # hi-res claims are listened to a second time
+                with self._cpu():
+                    held_rate, held_bits = sampler.pcm_truth(src, rate, bits, self.stop)
+            fitted = quality.fit(self.fmt, honest_lossless, sources.LOSSLESS_KBPS if honest_lossless else cand["kbps"])
+            fmt = quality.fit_pcm(fitted, rate, bits if honest_lossless else 0, held_rate, held_bits)
+            rc.raw["match_note"] = quality.match_note(fitted, fmt, self.fmt, rate, bits, held_rate, held_bits)
+        raw_kbps = int(file_kbps / sources.CODEC_WEIGHT.get(family, 1.0)) if file_kbps and not lossless_src else 0
+        action = transcode.plan(family, raw_kbps, fmt, (bits or 16) if lossless_src else 16)
+        fx, af = self._finishing(rc, src), ""
+        if fx is not None and fx.active:
+            action = "encode"                                          # a straight copy can't be made louder or trimmed
+            af = fx.chain(dither=transcode.writes_16bit(fmt, bits or 16, lossless_src))
         self._stage(rc, "Encoding" if action == "encode" else "Saving")
         dst = os.path.join(tmpdir, f"out{rc.index}_{abs(hash(cand['id'])) % 10**6}{fmt.ext}")
         try:
             with self._cpu():                                          # only so many encodes at once, the extra ones gently
-                transcode.encode(src, dst, fmt, action, self.budget.threads(), self.stop, lossless_src)
+                transcode.encode(src, dst, fmt, action, self.budget.threads(), self.stop, lossless_src, af)
         except Stopped:
             raise
         except Exception as e:
@@ -1007,11 +1118,37 @@ class Job:
         info = read_info(dst)
         if info is None or info.seconds < 5:
             return None
-        if not (self.fits(rc, info.seconds) or self.fits(rc, info.seconds, deep=True)):
+        full = info.seconds + (fx.removed if fx is not None else 0.0)    # trimmed silence still counts toward the song's length
+        listed = float(cand.get("seconds") or 0)
+        near_listing = abs(full - listed) <= max(5.0, 0.1 * listed)
+        if not ((lenient and near_listing) or self.fits(rc, full) or self.fits(rc, full, deep=True)):
             os.remove(dst)
             return "length"
         q = sources.LOSSLESS_KBPS if honest_lossless else (cand["kbps"] or info.kbps)
         return dst, info, int(q), fmt
+
+    def _finishing(self, rc, src):
+        """Listen to the downloaded file and work out its volume / trim / EQ chain (an Fx, or None).
+        Whatever happens here, the song is still saved: an analysis that fails just means it is saved untouched."""
+        rc.raw["fx"] = None
+        rc.raw["fx_note"] = ""
+        if not self.spec:
+            return None
+        self._stage(rc, "Finishing the sound")
+        try:
+            with self._cpu():
+                fx = process.analyze(src, self.spec, self.stop)
+        except Stopped:
+            raise
+        except Exception as e:
+            log.info("audio finishing skipped (%s): %s", rc.track.title, e)
+            fx = None
+        if fx is None:
+            rc.raw["fx_note"] = "Sound options skipped"
+            return None
+        rc.raw["fx"] = fx
+        rc.raw["fx_note"] = fx.note()
+        return fx
 
     # ---------------------------------------------------------------- artwork
     # service art -> the catalogue's picture of the fitting release -> Cover Art Archive -> the picture inside the download
@@ -1198,4 +1335,6 @@ def run_headless(tracks, outdir, settings, stop=None, printer=print, ai=None):
                 extra = f" ({'lossless' if r.quality_kbps >= 1000 else str(r.quality_kbps) + ' kbps'})" if r.quality_kbps else ""
                 printer(f"[{state['done']}/{state['total']}] {tag}: {r.track} - {r.artist}{extra}"
                         + (f" — {r.note}" if r.note else ""))
+                for o in r.close[:3]:
+                    printer(f"      close: {o['title']} · {o.get('channel', '')} · {', '.join(o['why'])} · {o['url']}")
     return Job(tracks, outdir, settings, emit=emit, stop=stop, ai=ai).run()

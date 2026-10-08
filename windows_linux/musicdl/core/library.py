@@ -23,14 +23,27 @@ class Library:
         self._lock = threading.RLock()
         self._dirty, self._saved_at = 0, 0.0
         self.data = {"version": 3, "meta": {}, "catalog": {}, "tracks": {}, "files": {}}
+        loaded = self._read()
+        if loaded is None and os.path.exists(self.path):              # damaged: set aside, the last good copy instead
+            try:
+                from . import shield
+                from .. import platform_
+                if shield.heal_library(outdir, shield.shield_dir(platform_.config_dir())):
+                    log.warning("the folder's record was damaged; the last good copy was put back")
+                loaded = self._read()
+            except Exception:
+                log.debug("library recovery failed", exc_info=True)
+        for k in BUCKETS:
+            if isinstance((loaded or {}).get(k), dict):
+                self.data[k] = loaded[k]
+
+    def _read(self):
         try:
             with open(self.path, encoding="utf-8") as fh:
                 loaded = json.load(fh)
-            for k in BUCKETS:
-                if isinstance(loaded.get(k), dict):
-                    self.data[k] = loaded[k]
+            return loaded if isinstance(loaded, dict) else None
         except (OSError, ValueError):
-            pass
+            return None
 
     def track(self, name):
         with self._lock:

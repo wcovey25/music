@@ -1,6 +1,7 @@
 """Optimized mode: the source cap (never a lossless file bigger than its source deserves), the sampler that checks what
 a source really is, and the Apple / Windows·Android choice (AAC·ALAC versus MP3·FLAC)."""
 import os
+import subprocess
 import threading
 import time
 import unittest
@@ -92,7 +93,8 @@ class DeviceTests(unittest.TestCase):
 
     def test_the_cap_belongs_to_optimized_mode(self):
         self.assertTrue(Settings(mode="easy").capped)
-        self.assertFalse(Settings(mode="advanced").capped)
+        self.assertFalse(Settings(mode="advanced", match_source=False).capped)
+        self.assertTrue(Settings(mode="advanced").capped, "Match the source is on by default in Advanced too")
 
     def test_the_mac_edition_defaults_to_apple_formats(self):
         from musicdl import config
@@ -176,6 +178,68 @@ class SamplerTests(unittest.TestCase):
         self.assertLess(time.perf_counter() - t, 4.0)
 
 
+class MatchSourceTests(unittest.TestCase):
+    """Match the source: sample rate and bit depth never above what the source really holds."""
+
+    def test_rate_and_depth_come_down_to_what_the_source_holds(self):
+        got = quality.fit_pcm(OutFmt("flac", bit_depth=0), 96000, 24, 44100, 16)
+        self.assertEqual((got.sample_rate, got.bit_depth), (44100, 16))
+
+    def test_nothing_known_changes_nothing(self):
+        fmt = OutFmt("flac", bit_depth=0)
+        self.assertIs(quality.fit_pcm(fmt), fmt)
+        self.assertIs(quality.fit_pcm(fmt, 44100, 16), fmt, "the source's own rate and depth are kept as they are")
+
+    def test_a_rate_above_the_sources_becomes_keep(self):
+        got = quality.fit_pcm(OutFmt("flac", sample_rate=96000, bit_depth=24), 44100, 16)
+        self.assertEqual((got.sample_rate, got.bit_depth), (0, 0), "0 = keep the source's own, so it can be copied")
+
+    def test_bit_depth_is_only_for_lossless(self):
+        fmt = OutFmt("mp3", kbps=320, sample_rate=0, bit_depth=16)
+        self.assertEqual(quality.fit_pcm(fmt, 44100, 24, 0, 16).bit_depth, 16)
+
+    def test_the_note_says_what_was_matched(self):
+        chosen = OutFmt("mp3", kbps=320)
+        fitted = OutFmt("mp3", kbps=192)
+        self.assertEqual(quality.match_note(fitted, fitted, chosen), "Matched to source · MP3 192 kbps")
+        asked = OutFmt("flac", bit_depth=0)
+        fitted = quality.fit_pcm(asked, 96000, 24, 44100, 16)
+        self.assertEqual(quality.match_note(asked, fitted, asked, 96000, 24, 44100, 16),
+                         "Matched to source · 44.1 kHz · 16-bit")
+        self.assertEqual(quality.match_note(asked, asked, asked), "")
+
+
+class PcmTruthTests(unittest.TestCase):
+    """What a hi-res file really holds, found by listening to it."""
+
+    @classmethod
+    def setUpClass(cls):
+        d = fresh_dir("pcm_truth")
+        base = os.path.join(d, "cd.wav")
+        make_noise(base, 12, "-c:a", "pcm_s16le")
+        cls.padded = os.path.join(d, "padded24.flac")
+        cls.up96 = os.path.join(d, "up96.flac")
+        cls.real96 = os.path.join(d, "real96.flac")
+        for args, out in ((["-i", base, "-c:a", "flac", "-sample_fmt", "s32", "-bits_per_raw_sample", "24"], cls.padded),
+                          (["-i", base, "-ar", "96000", "-c:a", "flac"], cls.up96),
+                          (["-f", "lavfi", "-i", "anoisesrc=color=white:amplitude=0.5:duration=12:sample_rate=96000",
+                            "-ac", "2", "-c:a", "flac", "-sample_fmt", "s32", "-bits_per_raw_sample", "24"], cls.real96)):
+            subprocess.run([FFMPEG, "-y", "-v", "error", *args, out], check=True)
+
+    def test_sixteen_bit_sound_in_a_24_bit_file(self):
+        self.assertEqual(sampler.pcm_truth(self.padded, 44100, 24), (44100, 16))
+
+    def test_cd_sound_in_a_96_khz_file(self):
+        rate, _ = sampler.pcm_truth(self.up96, 96000, 16)
+        self.assertIn(rate, (44100, 48000))
+
+    def test_real_hi_res_is_left_alone(self):
+        self.assertEqual(sampler.pcm_truth(self.real96, 96000, 24), (96000, 24))
+
+    def test_a_missing_file_proves_nothing(self):
+        self.assertEqual(sampler.pcm_truth(os.path.join(fresh_dir("pcm_none"), "none.flac"), 96000, 24), (96000, 24))
+
+
 class EdgeMathTests(unittest.TestCase):
     """The spectrum maths on made-up band levels (no audio)."""
 
@@ -207,7 +271,7 @@ class EdgeMathTests(unittest.TestCase):
 
     def test_cutoff_to_bitrate(self):
         self.assertEqual([sampler.q_from_cutoff(h) for h in (16000, 17250, 17500, 18500, 19500, 19750, 21000)],
-                         [128, 128, 160, 192, 224, 0, 0])
+                         [112, 128, 160, 192, 224, 0, 0])
 
     def test_silence_and_short_input(self):
         self.assertEqual(sampler.analyse([0.0] * 50000), 0)
@@ -316,8 +380,25 @@ class CapJobTests(unittest.TestCase):
         self.assertEqual((r.src_kbps, info.src_kbps), (128, 128), "the file's record says what the source really was")
         self.assertIn("No lossless source", r.note)
 
-    def test_the_same_file_in_advanced_mode_is_written_as_asked(self):
+    # ---- Match the source (Advanced)
+
+    def test_match_the_source_writes_a_lossy_source_at_what_it_holds(self):
+        r = self.result(settings(mode="advanced", fmt="mp3", bitrate=320), cand("plain128.mp3", 40, 128))
+        self.assertEqual(r.status, "ok", r.note)
+        self.assertIn("Matched to source", r.note)
+        self.assertLessEqual(read_info(os.path.join(self.out, "Alpha - Tester.mp3")).kbps, 140)
+
+    def test_match_the_source_never_pads_lossy_sound_into_flac(self):
         r = self.result(settings(mode="advanced", fmt="flac"), cand("plain128.mp3", 40, 128))
+        self.assertEqual((r.status, self.files()), ("ok", ["Alpha - Tester.mp3"]))
+
+    def test_a_lossless_source_stays_lossless(self):
+        r = self.result(settings(mode="advanced", fmt="flac"), cand("real.flac", 40, 1411, True))
+        self.assertEqual((r.status, self.files()), ("ok", ["Alpha - Tester.flac"]))
+        self.assertNotIn("Matched", r.note)
+
+    def test_the_same_file_in_advanced_mode_is_written_as_asked(self):
+        r = self.result(settings(mode="advanced", fmt="flac", match_source=False), cand("plain128.mp3", 40, 128))
         self.assertEqual(self.files(), ["Alpha - Tester.flac"], "Advanced does what it is told")
         self.assertEqual(r.status, "ok")
         self.assertEqual(self.job.summary(), "")

@@ -88,6 +88,7 @@ def settings(**kw):
     st = Settings()
     st.auto, st.parallel, st.min_kbps, st.verify = False, 3, 128, True
     st.device = "other"                      # MP3/FLAC on every OS (a Mac's default would be AAC/ALAC)
+    st.match_source = False                  # these tests check that Advanced writes what it is told; see test_match_source
     for k, v in kw.items():
         setattr(st, k, v)
     return st

@@ -8,12 +8,14 @@ views_source.py — the top card. One card, four states:
 """
 import logging
 import re
+import threading
 import time
 import tkinter as tk
 from tkinter import filedialog
 
-from .. import ai, ingest
+from .. import ai, ingest, platform_
 from ..core import disk, netio
+from ..ingest import suggest
 from ..meta import artwork
 from ..telemetry.stats import T
 from . import fmt
@@ -25,7 +27,8 @@ log = logging.getLogger("musicdl")
 
 CHIPS = (("spotify", "Spotify"), ("apple", "Apple Music"), ("ytmusic", "YouTube Music"), ("amazon", "Amazon Music"),
          ("youtube", "YouTube"), ("pandora", "Pandora"), ("sheet", "Spreadsheet"))
-HINT = "Paste a playlist, album or song link — or type a name."
+HINT = "Paste a link, or search for a song, artist, album or genre."
+SUGGEST_DELAY_MS = 70                         # how long typing has to pause before suggestions are asked for
 AI_HINT = "Describe the playlist you’d like, for example “mellow 90s rock for a long drive, 30 songs”."
 
 
@@ -47,6 +50,7 @@ def fetch_art(url, stop):
 
 class SourceMixin:
     def _init_source(self, initial):
+        suggest.open_index(platform_.config_dir())
         self.source_text = initial or ""
         self.multi = ""
         self.multi_label = ""
@@ -59,10 +63,16 @@ class SourceMixin:
         self.shown_fraction = 0.0
         self._ra_last = {}
         self.pulse, self._pulse_key, self._bursts_seen = None, None, 0
+        self._sg_gen, self._sg_job, self._sg_stop = 0, None, None        # suggestions: newest request, its timer, its cancel flag
+        self._sg_items, self._sg_quiet = [], ""
+        self._src_set = False                                             # the field's text is being set by the program, not typed
+        self._src_box = None                                              # where the field is (the list hangs from it)
 
     # ---------------------------------------------------------------- entry bookkeeping
     def close_entries(self):
         self.src_remember()
+        self._suggest_cancel()
+        self._suggest_hide()
         super().close_entries()
 
     def src_remember(self):
@@ -115,11 +125,20 @@ class SourceMixin:
         placeholder = AI_HINT if self.ai_prompt else HINT
         placeholder = gk.fit(placeholder, self.f_body, w - p(48))
         text = self.multi_label if self.multi else self.source_text
-        rec = self.entry("src", box, text=text, placeholder=placeholder, font=self.f_body, on_change=self._src_changed,
-                         on_commit=lambda v: self.submit_source(), on_focus=lambda on: cv.itemconfigure(
-                             item, image=imgs[on]), group="A", pad=22)
+        self._src_box = box
+        self._src_set = True                              # building the field with its text is not typing
+        try:
+            rec = self.entry("src", box, text=text, placeholder=placeholder, font=self.f_body, on_change=self._src_changed,
+                             on_commit=lambda v: self.submit_source(), on_focus=lambda on: cv.itemconfigure(
+                                 item, image=imgs[on]), group="A", pad=22)
+        finally:
+            self._src_set = False
         e = rec["widget"]
         e.bind("<<Paste>>", self._on_paste)
+        e.bind("<Down>", lambda ev: self._src_arrow(1))
+        e.bind("<Up>", lambda ev: self._src_arrow(-1))
+        e.bind("<Return>", self._src_return)
+        e.bind("<Escape>", self._src_escape)
         if resolving:
             e.config(state="disabled")
         elif not self.source_text and not self.multi:
@@ -195,8 +214,127 @@ class SourceMixin:
                 on = k == key
                 self.cv.itemconfigure(item, image=self.cached(
                     ("chip", pw, ph, on, False, self.name), lambda: gk.chip_image(pw, ph, on, False, self.th, self.S)))
-        if self.status and self.stage == "idle":
+        if self.status and self.stage == "idle" and not self._src_set:       # typing clears an old message; redrawing does not
             self.set_status("")
+        self._suggest_schedule(text)
+
+    # ---------------------------------------------------------------- suggestions while typing
+    def _suggest_text(self, value):
+        """What to ask suggestions about: the text, when it is a name being typed (not a link, a file or a pasted list)."""
+        t = (value or "").strip()
+        if (self.stage != "idle" or self.page != "main" or self.ai_prompt or self.multi or self.sheet_state
+                or len(t) < suggest.MIN_CHARS or t == self._sg_quiet or ingest.classify(t) != "search"):
+            return None
+        return t
+
+    def _suggest_cancel(self):
+        """Whatever was waiting or in flight is no longer wanted."""
+        if self._sg_job:
+            try:
+                self.root.after_cancel(self._sg_job)
+            except tk.TclError:
+                pass
+            self._sg_job = None
+        self._sg_gen += 1
+        if self._sg_stop:
+            self._sg_stop.set()
+            self._sg_stop = None
+
+    def _suggest_hide(self):
+        self._sg_items = []
+        if self.popup_state and self.popup_state.get("quiet"):
+            self.close_popup()
+
+    def _suggest_schedule(self, value):
+        self._suggest_cancel()
+        if self._src_set:
+            return
+        t = self._suggest_text(value)
+        if t is None:
+            self._suggest_hide()
+            return
+        known = suggest.instant(t)                                           # what this computer already knows: at once
+        if known:
+            self._suggest_show(t, known)
+        self._sg_job = self.root.after(SUGGEST_DELAY_MS, lambda: self._suggest_fire(t))
+
+    def _suggest_fire(self, t):
+        self._sg_job = None
+        if self._suggest_text(self.entry_value("src")) != t:                 # changed in the meantime
+            return
+        gen, stop = self._sg_gen, threading.Event()
+        self._sg_stop = stop
+
+        def work():
+            try:
+                items = suggest.search_all(t, stop, partial=lambda part: None if stop.is_set()
+                                           else self.runner.post("suggest", (gen, t, part)))
+            except Exception:
+                log.debug("suggestions failed", exc_info=True)
+                return
+            if not stop.is_set():
+                self.runner.post("suggest", (gen, t, items))                 # a queue put: safe from any thread
+        threading.Thread(target=work, name="suggest", daemon=True).start()
+
+    def on_suggest(self, gen, text, items):
+        if gen != self._sg_gen or self._suggest_text(self.entry_value("src")) != text:
+            return                                                           # an answer to something no longer typed
+        if not items or not self._src_box:
+            self._suggest_hide()                                             # (the final answer already holds what was shown)
+            return
+        self._suggest_show(text, items)
+
+    def _suggest_show(self, text, items):
+        if not self._src_box:
+            return
+        same = [(s.kind, s.title, s.subtitle) for s in items] == [(s.kind, s.title, s.subtitle) for s in self._sg_items]
+        if same and self.popup_state and self.popup_state.get("quiet"):
+            return                                                           # nothing new: no redraw
+        self._sg_items = items
+        rows = [(i, dict(title=sg.title, detail=sg.detail, tag=sg.tag)) for i, sg in enumerate(items)]
+        box = self._src_box
+        self.open_popup(box, rows, None, self._suggest_pick, width=box[2] - box[0], row_h=50, max_rows=suggest.SHOWN,
+                        quiet=True)
+
+    def _suggest_pick(self, i):
+        if not 0 <= i < len(self._sg_items):
+            return
+        sg = self._sg_items[i]
+        self._suggest_cancel()
+        self._sg_quiet = sg.label                           # putting its name into the field is not typing either
+        self._src_set = True
+        try:
+            rec = self.entries.get("src")
+            if rec:
+                rec["var"].set(sg.label)
+        finally:
+            self._src_set = False
+        self.source_text = sg.label
+        self.start_collect(sg)
+
+    def _src_arrow(self, step):
+        """Down/Up in the field: moves through the suggestions; Down asks for them straight away if there are none yet."""
+        if (self.popup_state or {}).get("quiet"):
+            self.popup_move(step)
+            return "break"
+        t = self._suggest_text(self.entry_value("src"))
+        if step > 0 and t:
+            self._suggest_cancel()
+            self._suggest_fire(t)
+        return "break"
+
+    def _src_return(self, event):
+        if (self.popup_state or {}).get("quiet") and self.popup_accept():
+            return "break"
+        self.submit_source()
+        return "break"
+
+    def _src_escape(self, event):
+        if (self.popup_state or {}).get("quiet"):
+            self.close_popup()
+        else:
+            self.cv.focus_set()
+        return "break"
 
     def _on_paste(self, event):
         try:
@@ -427,6 +565,7 @@ class SourceMixin:
                             font=self.f_chip)
 
     def start_over(self):
+        self.picks.clear()
         self.col, self.col_art, self.run = None, None, None
         self.set_status("")
         self.set_stage("idle")
@@ -490,6 +629,20 @@ class SourceMixin:
         def work(stop, post):
             ctx = ingest.Ctx(stop, lambda t: post("status", t))
             col = ingest.resolve(text, ctx)
+            if stop.is_set():
+                return
+            post("resolved", (col, fetch_art(col.artwork, stop)))
+        self._when_free(lambda: self.runner.start("resolve", work))
+
+    def start_collect(self, sg):
+        """A suggestion was chosen: load the songs it stands for (the song, the album, the artist's top songs …)."""
+        self.resolve_cancelled = False
+        self.status, self.status_tone = f"Loading {sg.title}…", "fg2"
+        self.set_stage("resolving", animate=False)
+
+        def work(stop, post):
+            ctx = ingest.Ctx(stop, lambda t: post("status", t))
+            col = suggest.collect(sg, ctx)
             if stop.is_set():
                 return
             post("resolved", (col, fetch_art(col.artwork, stop)))

@@ -123,11 +123,23 @@ class Settings:
     sample_rate: int = 0
     bit_depth: int = 16
     encoder_flags: str = ""
+    match_source: bool = True          # never write more than the source holds (no padded bitrates, no fake lossless)
     embed_art: bool = True
     write_tags: bool = True
     fetch_lyrics: bool = False
     lrc_files: bool = False
     template: str = DEFAULT_TEMPLATE
+    # audio finishing (see audio/process.py) — Advanced; Optimized mode has just the `polish` switch
+    level: bool = False                # bring every song to the same loudness
+    level_target: int = -14            # LUFS: -18 quiet · -14 balanced · -11 loud
+    trim: bool = False                 # cut dead silence at the start and end
+    trim_db: int = -50                 # below this level counts as silence
+    fade: str = "off"                  # off | short | long
+    enhance: str = "off"               # off | clarity | warmth | bass | vocal
+    dynamics: str = "off"              # off | gentle | strong
+    polish: bool = False               # Optimized mode: even out the volume and trim silence
+    shield_lock: bool = False          # the app's own files are read-only against deletion and change (core/shield.py)
+    clean_versions: bool = False       # False = explicit (the song as released, tagged explicit); True = clean edits
     # performance
     auto: bool = True
     parallel: int = 3
@@ -139,6 +151,7 @@ class Settings:
     youtube: bool = True
     verify: bool = True
     upgrade: str = "ask"               # ask | replace | keep — songs you already have, in lower quality than you now chose
+    close_match: str = "ask"           # ask | auto | skip — a song with no exact match: offer close ones / take a safe one / don't look
     # interface
     appearance: str = "auto"           # auto | light | dark
     sounds: bool = True
@@ -165,8 +178,9 @@ class Settings:
 
     @property
     def capped(self):
-        """Optimized mode never writes a file bigger than its source deserves (see quality.fit); Advanced does as told."""
-        return not self.advanced
+        """Never write a file bigger than its source deserves (see quality.fit). Optimized mode always does; Advanced
+        does unless 'Match the source' is switched off."""
+        return (not self.advanced) or bool(self.match_source)
 
     def preset_info(self):
         return preset(self.preset, self.device)
@@ -201,6 +215,19 @@ class Settings:
     def use_lrc(self):
         return self.advanced and self.fetch_lyrics and self.lrc_files
 
+    def audio_spec(self):
+        """What to do to each song's sound (audio.process.Spec), or None to leave it exactly as downloaded."""
+        from .audio import process
+        if self.advanced:
+            spec = process.Spec(level=bool(self.level), target=float(self.level_target), trim=bool(self.trim),
+                                trim_db=int(self.trim_db), fade=self.fade, enhance=self.enhance, dynamics=self.dynamics)
+        elif self.polish:
+            v = process.PROFILES["playlist"][1]
+            spec = process.Spec(level=True, target=float(v["level_target"]), trim=True, trim_db=int(v["trim_db"]))
+        else:
+            return None
+        return spec if spec.active else None
+
     def name_template(self):
         return DEFAULT_TEMPLATE if not self.advanced or not self.template.strip() else self.template.strip()
 
@@ -231,6 +258,17 @@ class Settings:
             self.appearance = "auto"
         if self.upgrade not in ("ask", "replace", "keep"):
             self.upgrade = "ask"
+        if self.close_match not in ("ask", "auto", "skip"):
+            self.close_match = "ask"
+        from .audio import process
+        self.level_target = max(-24, min(-8, int(self.level_target)))
+        self.trim_db = max(-70, min(-30, int(self.trim_db)))
+        if self.fade not in process.FADES:
+            self.fade = "off"
+        if self.enhance != "off" and self.enhance not in process.ENHANCE:
+            self.enhance = "off"
+        if self.dynamics != "off" and self.dynamics not in process.DYNAMICS:
+            self.dynamics = "off"
         if self.ai_provider not in PROVIDERS:
             self.ai_provider = "ollama"
         return self
@@ -243,14 +281,24 @@ class Settings:
     def load(cls):
         s = cls()
         try:
+            from .core import shield
+            shield.heal_settings(platform_.config_dir())              # a deleted or damaged file: the last good copy
+        except Exception:
+            pass
+        try:
             with open(cls.path(), encoding="utf-8") as fh:
                 data = json.load(fh)
+            if not isinstance(data, dict):
+                raise ValueError("not a settings object")
             known = {f.name for f in fields(cls)}
             for k, v in data.items():
                 if k in known and type(v) is type(getattr(s, k)):
                     setattr(s, k, v)
-        except (OSError, ValueError):
+        except OSError:
             pass
+        except ValueError:                                            # damaged and no good copy: keep it aside, start afresh
+            from .core import shield
+            shield.set_aside(cls.path())
         if not s.outdir:
             s.outdir = platform_.default_music_dir()
         try:

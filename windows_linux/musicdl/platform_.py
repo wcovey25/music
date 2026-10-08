@@ -570,3 +570,54 @@ def message_box(title, text):
     except Exception:
         pass
     print(f"{title}: {text}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------- keeping the app whole (see core/shield.py)
+
+# (name shown, lower-case start of a folder name under Program Files / AppData\Local\Programs): tools that remove or
+# quarantine other programs' files
+CLEANERS = (("CCleaner", "ccleaner"), ("Malwarebytes", "malwarebytes"), ("Avast", "avast"), ("AVG", "avg"),
+            ("Avira", "avira"), ("Norton", "norton"), ("Bitdefender", "bitdefender"), ("Kaspersky", "kaspersky"),
+            ("McAfee", "mcafee"), ("ESET", "eset"), ("BleachBit", "bleachbit"), ("Glary Utilities", "glary"),
+            ("Advanced SystemCare", "iobit"), ("Wise Care 365", "wise"))
+DEFENDER = "Microsoft Defender"
+
+
+def _program_dirs():
+    if os.environ.get("MUSICDL_APP_DIRS"):
+        return os.environ["MUSICDL_APP_DIRS"].split(os.pathsep)
+    if not IS_WINDOWS:
+        return []
+    out = [os.environ.get(k) for k in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")]
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        out.append(os.path.join(local, "Programs"))
+    return [d for d in dict.fromkeys(out) if d]
+
+
+def cleaner_apps():
+    """Names of cleaning or security tools installed here (they can delete or quarantine other programs' files).
+    Microsoft Defender is listed when its folder is there (on Windows 10/11 it always is)."""
+    found = []
+    for folder in _program_dirs():
+        try:
+            names = [n.lower() for n in os.listdir(folder)]
+        except OSError:
+            continue
+        if "windows defender" in names and DEFENDER not in found:
+            found.append(DEFENDER)
+        for label, start in CLEANERS:
+            if label not in found and any(n.startswith(start) for n in names):
+                found.append(label)
+    return found
+
+
+def open_virus_settings():
+    """Open Windows Security at Virus & threat protection settings (Exclusions are there). True when it was asked to."""
+    if not IS_WINDOWS:
+        return False
+    try:
+        os.startfile("windowsdefender://threatsettings/")                # noqa: S606
+        return True
+    except Exception:
+        return False

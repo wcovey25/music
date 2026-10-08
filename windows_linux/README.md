@@ -4,8 +4,12 @@ Paste a playlist, album or song link (or just type a name) and get tagged audio 
 folder. A calm, glassy window; no terminal.
 
 - **Optimized mode** (default): pick *Good*, *Better* or *Best* and press Download.
-- **Advanced mode**: MP3, AAC, FLAC, ALAC or WAV; bitrate, sample rate, bit depth, your own ffmpeg flags, lyrics,
-  naming templates, and a live dashboard (speed graph, searches per minute, service latency, time left).
+- **Advanced mode**: MP3, AAC, FLAC, ALAC or WAV; bitrate, sample rate, bit depth, your own ffmpeg flags, a **Sound**
+  tab (even volume, silence trim, fades, EQ), lyrics, naming templates, and a live dashboard (speed graph, searches per
+  minute, service latency, time left).
+- **A search bar**: type a name and pick from suggestions; songs that can't be found exactly get **close matches** to
+  choose from; **clean versions** on request; files never bigger than their source deserves.
+- **Protection**: the app checks its own files at every start and puts back what a cleaner deleted.
 - **AI Mode** (optional): fixes messy song details, builds a playlist from a description, adds genres. Works with a
   local Ollama server or your own OpenAI / Anthropic / Gemini key.
 
@@ -57,7 +61,7 @@ Prefer a command line? `py -3 -m pip install -r requirements.txt`, then `py -3 -
 1. **Paste or type** in the top box, then press **Find songs** (or Enter). It understands:
    Spotify, Apple Music, YouTube Music, YouTube, Amazon Music and Pandora links; other sites yt-dlp knows
    (SoundCloud, Bandcamp …); a CSV/XLSX list (the **Spreadsheet** chip); several lines of `Artist - Title`; or a plain
-   name such as `Abbey Road Beatles`.
+   name such as `Abbey Road Beatles` — which also lists suggestions as you type (see *The search bar*).
 2. Check the song list tile, pick a quality (**Optimized**) or open **Advanced**, press **Download**.
 3. Watch it work: percentage, current song, time left. **Stop** is always there and winds down cleanly. Finished songs
    show up in **Activity**; anything that needs a look (not found, wrong length, low quality) is under **Attention**.
@@ -70,10 +74,31 @@ Songs go straight into your music folder (default `Music\Music Downloader` in yo
 Change the folder under **Settings** (the gear).
 
 **Settings** covers: *Automatic* performance (measures your CPU and connection and picks how many songs to fetch at
-once), accuracy (length tolerance, minimum quality, replace low-quality files, YouTube fallback), appearance
-(Auto / Light / Dark), sounds and volume, the launch animation, the music folder, and AI Mode.
+once), accuracy (length tolerance, minimum quality, replace low-quality files, YouTube fallback, better versions, close
+matches), **Songs** (clean versions; in Optimized mode **Polish every song**, which evens out the volume and trims dead
+silence at the ends — in Advanced the same controls are on the **Sound** tab), appearance (Auto / Light / Dark), sounds
+and volume, the launch animation, the music folder, AI Mode, and **Protection** (see *Keeping the app whole*).
 
-### Quality and the source cap (Optimized mode)
+### The search bar
+
+The top box is also a search bar. Type a song, an artist, an album, a genre or a mood — anything that isn't a link —
+and a moment later a short list drops down: songs, albums, artists, playlists and genres that match, the best guess
+first, each saying who it is by. Use **↑ ↓** and **Enter** (or click) to pick one; **Esc** closes the list and leaves
+what you typed alone. The rest of the window stays usable while the list is open. You still see the song list before
+anything downloads.
+
+- A **song** is that song, an **album** the whole album, an **artist** their top songs, a **playlist** its first 300
+  songs and a **genre** its current chart.
+- The suggestions come from Deezer's public search (no account or key; only what you type is sent). They are ranked by
+  how much of what you typed each result explains, how well known it is and whether it is the real thing: a cover,
+  karaoke or remix is pushed down unless you typed that word. What was seen before is kept on this computer
+  (`suggest_index.json` in the settings folder, at most 1,500 entries), so a familiar name is suggested at once.
+- Offline, or when that search can't be reached, no list appears and nothing else changes: links, lists, files and
+  pressing Enter on a name work as before.
+
+*Tested against a local fake of Deezer's search; the ranking was not tuned against the real service from Windows.*
+
+### Quality and "match the source"
 
 Pick **Good**, **Better** or **Best**, and — top right of the quality card — what you play your music on:
 
@@ -97,11 +122,22 @@ song the app looks at what it really got:
 - a file that *claims* to be lossless is listened to for a moment: lossy encoders leave a hard cut-off in the spectrum
   (about 16 kHz at 128 kbps), so a "FLAC" that is really a 128 kbps MP3 is caught and saved as such.
 
-The Activity list says "No lossless source · MP3 160 kbps" for such songs and the end of the run says how many there
-were. Limits, honestly: the spectrum check recognises 128–224 kbps MP3/AAC-style origins; it cannot tell a 256–320 kbps
-origin or a full-band Opus rip from lossless, and it errs on the side of believing a file. The sizes shown in the
-quality card are an upper limit ("up to about …"). **Advanced mode is not capped**: it writes exactly the format you
-chose.
+- a "hi-res" file (96 kHz or 24-bit) is checked too: one made from CD audio (empty low bits, nothing above the CD
+  range) is not written bigger than CD audio.
+
+The Activity list says "No lossless source · MP3 160 kbps" or "Matched to source · …" for such songs and the end of the
+run says how many there were.
+
+In **Advanced** mode this is the **Match the source** switch (Format section), on by default. Choose MP3 320 or FLAC and
+the source decides how much of it is used; switch it off and the format is written exactly as chosen, bigger than the
+source if need be — the old behaviour, for anyone who wants a fixed bitrate regardless.
+
+*Limits, honestly:* the listening check recognises MP3/AAC-style origins from about 64 up to 192 kbps (the encoder's
+cut-off is a clear cliff there). From about 224 kbps up the cut-off is too close to the top of the spectrum to tell
+from a real recording, so a 256–320 kbps origin or a full-band Opus rip is believed — it errs on the side of trusting a
+file, because turning a real lossless file into MP3 is the worse mistake. Music with a deliberate digital low-pass can
+look lossy, though only a total silence above the cut-off counts. The sizes shown in the quality card are an upper limit
+("up to about …").
 
 ### Songs you already have
 
@@ -122,6 +158,56 @@ anything is fetched: **Replace with higher quality?**, with *Keep Existing* or *
   list says so ("no lossless version found").
 - A song where nothing better was found is remembered for a month, so it isn't searched again on every run.
 - **Settings → Better versions**: *Ask* (default), *Replace* (always, no question) or *Keep* (never replace).
+
+### Songs that can't be found exactly
+
+On a long playlist a few songs are always hard to place: spelled differently on YouTube, only a live take uploaded,
+credited to another artist. Instead of just saying "not found", the app searches *around* the song — the title alone,
+then the artist, the song's words and "lyrics" — and keeps what could plausibly be that music, each labelled in plain
+words (*Live version*, *0:42 longer*, *Uploaded by …*). Karaoke, tutorials, reaction videos, nightcore / slowed / 8D
+versions, mashups and hour-long loops are never offered.
+
+**Settings → Close matches** decides what happens:
+
+- **Ask** (default): the song is listed under Attention with a **Choose…** button that opens the options; pick one and
+  that recording is downloaded. When a run ends with such songs you are asked once whether to review them.
+- **Auto**: takes a close match by itself, but only a safe one — the same song by the same artist whose length differs
+  by at most a quarter. Live takes, covers, remixes and uploads by someone else are always left for you to pick.
+- **Off**: songs that can't be found exactly are just reported.
+
+A recording you pick yourself is accepted even if its length differs, because you chose it. *Limits:* the wider search
+looks on YouTube only, not the Internet Archive; it was tested against a faked YouTube search, not the real one.
+
+### Finishing the sound (Sound tab, Polish)
+
+In **Advanced → Sound**, each song can be finished in the same ffmpeg pass that writes it (no second encode, no extra
+loss):
+
+- **Even out the volume** to one loudness (Quiet −18, Balanced −14, Loud −11 LUFS — the scale streaming services use),
+  with a limiter so a louder song can't clip. A boost is capped at 14 dB.
+- **Trim silence** before the music starts and after it ends (Careful / Balanced / Tight), leaving a breath at the start
+  and the last ring of the ending, with a soft fade at each cut. Never more than half a song is cut. The trimmed seconds
+  still count when the song's length is checked, so a trimmed song is not taken for a wrong cut, now or on a later run.
+- **Fades** (Off / Short / Long), **Enhance** (Clarity, Warmth, Bass boost, Vocal focus — a few dB each) and
+  **Dynamics** (Gentle / Strong).
+- **Quick setup** sets them all at once: *Playlist ready*, *Car & speakers*, *Late night*.
+
+In Optimized mode the single switch **Settings → Songs → Polish every song** does *Playlist ready* (volume + trim). The
+Activity list says what was done to each song ("Trimmed 2.1 s of silence · Volume +3.2 dB"). If a song can't be
+analysed it is saved untouched and says "Sound options skipped" — a sound option never fails a song. Off by default:
+with nothing switched on every song is saved exactly as downloaded. *Tested on synthetic tones and silence; nobody has
+listened to the EQ presets on real music.*
+
+### Explicit and clean versions
+
+**Settings → Songs → Clean versions** (off by default, so you get the explicit versions, as released). With it on, the
+search asks for the clean edit first ("… clean version") and prefers uploads that say *Clean*, *Radio Edit* or
+*Censored*; a word that is part of the song's own name doesn't count (*Clean* by Taylor Swift is not a radio edit). A
+song the catalogue says has no explicit words costs no extra search. The Explicit / Clean badge follows what the file
+most likely *is* — the upload's own title first, then the catalogue — never the switch alone, so an explicit file is
+never labelled clean; when no clean edit could be found the Activity list says "No clean version found". Existing files
+are not re-tagged when you flip the switch. *Tested with faked searches; a real clean edit on YouTube is only as
+findable as its title makes it.*
 
 ### Artwork and song details
 
@@ -243,6 +329,38 @@ Press **Connect**, choose a model. Then: an **AI playlist** chip appears next to
 **Tidy my music folder** adds genres to songs you already have. Only titles, artists and albums are sent to a model —
 never audio files or file paths.
 
+### Keeping the app whole (Protection)
+
+Cleaners, virus scanners and half-finished updates sometimes delete or quarantine a few of a program's files, and the
+program then fails to start with no hint why. **Settings → Protection** is the app's answer.
+
+- **The check at each start.** The app keeps a list of its own files (size and SHA-256) and, outside the app folder, a
+  copy of them (`%APPDATA%\MusicDownloader\shield\snapshot.zip`). A few seconds after the window opens it checks the
+  files: a **deleted** file is put back from the copy at once; a **changed** file is only reported, and you decide
+  (*Restore* or keep it), because it might be an edit you made; a real update ships its own list and is accepted.
+  `MusicDownloader.pyw` does the "put back deleted files" part *before* the rest of the program is loaded, so a copy
+  that lost files still starts — even if the checker itself was deleted, it is taken from the copy first.
+- **Lock program files** sets Windows' read-only attribute on the app's files, so a program that deletes or rewrites
+  files without asking is refused (Explorer can still delete them after a "This file is read-only" question). Off by
+  default; switching it off unlocks everything.
+- **Settings and your song folder's record are backed up** (the last three different copies, in the same `shield`
+  folder). A damaged `settings.json` or `.musicdl.json` is set aside as `….damaged` and the newest good copy is put
+  back; a record you deleted on purpose stays deleted (that is how a full re-check is asked for).
+- **Cleaners and scanners** lists the ones installed (Microsoft Defender, CCleaner, Malwarebytes, Avast, AVG, Norton,
+  Bitdefender, Kaspersky, McAfee, ESET, …). **Folders to exclude → Copy** puts the folders such a tool should leave alone
+  on the clipboard; **Windows Security → Open** goes straight to Virus & threat protection settings, where Exclusions
+  are.
+- **Recovery script** opens the `shield` folder, which holds `Restore Music Downloader.bat`: if the whole app folder is
+  deleted, double-click it to unpack the saved copy back where it was.
+
+**What this cannot do:** an administrator (or a cleaner run as one) can still remove read-only files; the Python
+packages and ffmpeg can't be rebuilt offline (the check names them; run `setup_windows.bat` again, which needs the
+internet); adding exclusions in other programs is manual; the app is unsigned; there is no background service, so a
+deletion is noticed at the next start, not instantly; a developer's git checkout is never sealed or locked. *Tested on
+synthetic folders on Linux (the read-only attribute through Python's `os.chmod`, which is what sets it on Windows); the
+lock, the `.bat` (cmd + PowerShell `Expand-Archive`), the Windows Security link and the cleaner detection have **not
+been run on a real Windows PC**, nor against a real cleaner or scanner.*
+
 ### Where things are kept
 
 | What | Windows | Linux |
@@ -250,6 +368,7 @@ never audio files or file paths.
 | Settings | `%APPDATA%\MusicDownloader` | `~/.config/musicdownloader` |
 | Cache (sounds, lookups) | `%LOCALAPPDATA%\MusicDownloader\cache` | `~/.cache/musicdownloader` |
 | Log (for troubleshooting) | `musicdl.log` in the settings folder (Settings → Log file) | same |
+| Protection (copy of the app, backups, recovery script) | `%APPDATA%\MusicDownloader\shield` | `~/.config/musicdownloader/shield` |
 
 Delete those folders to reset the app completely. Your songs are never touched.
 
@@ -282,16 +401,20 @@ Delete those folders to reset the app completely. Your songs are never touched.
 
 ```
 musicdl/
-  ui/         window: shell.py (canvas, hit regions, animation), glass.py (Pillow-drawn liquid glass), app.py + views_*.py
-  ingest/     links → song lists (Spotify, Apple, YouTube, Amazon, Pandora, web pages, spreadsheets, text search)
-  core/       the downloader engine: sources, matching, parallel workers, retries, cleanup
+  ui/         window: shell.py (canvas, hit regions, animation), glass.py (Pillow-drawn liquid glass), app.py + views_*.py,
+              protect.py (Settings › Protection and the start-up check)
+  ingest/     links → song lists (Spotify, Apple, YouTube, Amazon, Pandora, web pages, spreadsheets, text search);
+              suggest.py (the search bar's suggestions)
+  core/       the downloader engine: sources, matching, parallel workers, retries, cleanup; closematch.py (songs that
+              can't be found exactly); shield.py (keeping the app's own files whole, backups — stdlib only)
   meta/       tags, cover art, lyrics, file naming
-  audio/      ffmpeg encoding, sound-cue synthesis and playback
+  audio/      ffmpeg encoding, the source check (sampler.py), sound finishing (process.py), sound-cue synthesis
   telemetry/  speed, latency, searches per minute, ETA
   ai/         Ollama / OpenAI / Anthropic / Gemini connectors and the tasks built on them
   platform_.py   everything that differs per operating system
-tests/        cd tests && py -3 -m unittest      (336 tests, no internet needed)
+tests/        cd tests && py -3 -m unittest      (518 tests, no internet needed)
               py -3 stress.py 400 8              (400 songs, 8 at once: memory, threads, Stop)
+              ui_shots.py                        (screenshots of the window for a look; needs a display)
 ```
 
 The macOS edition shares this code; after changing anything here run `py -3 ../sync_macos.py` to carry it over.

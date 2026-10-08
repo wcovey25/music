@@ -50,6 +50,7 @@ CODEC_WEIGHT = {"opus": 1.5, "vorbis": 1.25, "aac": 1.2, "mp4a": 1.2, "m4a": 1.2
 CONFIDENT = 12.0         # a match this good needs no further searching
 BAND = 2.5               # candidates within this many points of the best match are "equally good matches"
 YT_QUERIES = ("ytsearch10:{a} {t}", "ytsearch8:{a} {t} official audio", "ytsearch6:{t} {a} topic")
+CLEAN_QUERY = "ytsearch10:{a} {t} clean version"          # asked first when clean versions are wanted
 RIPPED_KBPS = 160        # what a file that was ripped from a video is worth, whatever its container claims
 
 # archive.org files that are really a video's soundtrack saved through a converter
@@ -101,6 +102,32 @@ def penalty(rc, title):
     if re.search(r"re-?record", title.lower()) and "rerecord" not in "".join(words):
         pen += 3.5
     return pen
+
+
+_CLEAN = re.compile(r"\bclean\b|radio (?:edit|version|mix|friendly)|\bcensored\b|\bedited\b|\bsanitized\b|family friendly", re.I)
+_EXPLICIT = re.compile(r"\bexplicit\b|\buncensored\b|\buncut\b|\bdirty\b", re.I)
+
+
+def version_of(rc, title):
+    """'clean', 'explicit' or '' — what an upload's title says about itself (a word that is in the song's own name or
+    the artist's doesn't count: 'Clean' by Taylor Swift is not a radio edit)."""
+    own = set(norm_keep_parens(f"{rc.track.title} {rc.track.artist}").split())
+    for kind, pat in (("clean", _CLEAN), ("explicit", _EXPLICIT)):
+        for m in pat.finditer(title or ""):
+            if m.group(0).lower().split()[0] not in own:
+                return kind
+    return ""
+
+
+def version_bias(rc, title):
+    """Points for an upload whose title names the kind of version that was asked for, and points off for the other.
+    Explicit is the default, so a clean edit is only taken when it is all there is."""
+    said = version_of(rc, title)
+    if not said:
+        return 0.0
+    if getattr(rc, "clean", False):
+        return 3.0 if said == "clean" else -2.0
+    return 0.6 if said == "explicit" else -4.0
 
 
 def closeness(seconds, refs):
@@ -249,7 +276,7 @@ def _archive_files(rc, d, files):
         if ripped:                                       # a WAV made from a video's soundtrack is not lossless
             lossless, kbps = False, min(kbps or RIPPED_KBPS, RIPPED_KBPS)
         score = (4 * ov_a + 3 * ov_t + 2.5 * fit + 2.5 * closeness(seconds, rc.refs)
-                 + (0.5 if f.get("source") == "original" else 0) - pen
+                 + (0.5 if f.get("source") == "original" else 0) - pen + version_bias(rc, label)
                  - min(2.0, 0.4 * len(extra_words(rc.track_toks | rc.artist_toks, ftitle))))
         out.append({"source": "archive.org", "id": f"ia:{d['identifier']}/{name}",
                     "url": f"https://archive.org/download/{quote(d['identifier'])}/{quote(name)}",
@@ -268,13 +295,18 @@ def archive_candidates(rc, stop, fits, deep):
 
 # ---------------------------------------------------------------- YouTube
 
+def queries_for(rc):
+    return (CLEAN_QUERY,) + YT_QUERIES if getattr(rc, "clean", False) else YT_QUERIES
+
+
 def _yt_more(rc, st, stop):
     """Run the next search query. False when there is none left (or searching keeps failing)."""
-    if st["asked"] >= len(YT_QUERIES) or st["failed"] >= 2:
+    queries = queries_for(rc)
+    if st["asked"] >= len(queries) or st["failed"] >= 2:
         return False
     if stop.is_set():
         raise Stopped()
-    q = YT_QUERIES[st["asked"]].format(a=rc.artist, t=rc.title)
+    q = queries[st["asked"]].format(a=rc.artist, t=rc.title)
     st["asked"] += 1
     try:
         T.search()
@@ -317,6 +349,7 @@ def _yt_score(e, rc, fits, deep, tol):
     s -= 0.4 * ("lyric" in lower) + 0.4 * ("video" in lower and "audio" not in lower)    # videos have intros and skits
     s += min(1.0, math.log10(max(1, int(e.get("view_count") or 0))) / 9.0)         # a billion views is hard to fake
     s -= pen
+    s += version_bias(rc, title)
     s -= min(2.0, 0.4 * len(extra_words(rc.track_toks | rc.artist_toks, title)))
     return s
 
@@ -339,8 +372,21 @@ def convincing(rc, score, seconds, deep=False):
     return not refs or closeness(float(seconds), refs) >= 0.4
 
 
-def _convincing(rc, ranked, deep):
-    return bool(ranked) and convincing(rc, ranked[0][0], ranked[0][1]["duration"], deep)
+def _may_have_clean(rc):
+    """Could this song have a clean edit? Not when the catalogue was asked and says nothing about explicit words."""
+    if getattr(rc.track, "explicit", 0) or (rc.cat or {}).get("explicit"):
+        return True
+    return rc.cat is None or bool(rc.cat.get("failed"))
+
+
+def _convincing(rc, ranked, deep, asked=9):
+    """The best match is surely the song. When clean versions are wanted (and the song may have one) it must also be
+    the clean one, or a second search must already have looked for it."""
+    if not (ranked and convincing(rc, ranked[0][0], ranked[0][1]["duration"], deep)):
+        return False
+    if getattr(rc, "clean", False) and asked < 2 and _may_have_clean(rc):
+        return version_of(rc, ranked[0][1].get("title", "")) == "clean"
+    return True
 
 
 def youtube_candidates(rc, stop, fits, deep, tol):
@@ -349,7 +395,7 @@ def youtube_candidates(rc, stop, fits, deep, tol):
     st = rc.raw.setdefault("yt", {"entries": {}, "asked": 0, "failed": 0})
     probes = rc.raw.setdefault("probe", {})
     ranked = _yt_ranked(rc, st, fits, deep, tol)
-    while not _convincing(rc, ranked, deep) and _yt_more(rc, st, stop):
+    while not _convincing(rc, ranked, deep, st["asked"]) and _yt_more(rc, st, stop):
         ranked = _yt_ranked(rc, st, fits, deep, tol)
     out = []
     for s, e in ranked:

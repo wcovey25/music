@@ -13,10 +13,12 @@ from collections import deque
 from tkinter import messagebox
 
 from .. import APP_NAME, ai, autotune, platform_
-from ..core import engine
+from ..core import engine, netio
+from ..ingest import suggest
 from ..telemetry.stats import T
 from . import glass as gk
 from .glass import hx
+from .protect import ProtectMixin
 from .rows import Rows
 from .runner import Runner, wait_until
 from .shell import Shell
@@ -56,6 +58,7 @@ class RunState:
         self.pace = ""                      # set while the governor holds the run back ('Easing off while on battery — 2 at once')
         self.bursts = 0                     # songs finished with something new (the waveform ripples for each)
         self.seed = int(time.time() * 1000) & 0xFFFF            # gives every run its own waveform
+        self.settings = None                # the settings the run started with (a chosen close match is fetched with them)
 
     @property
     def fraction(self):
@@ -66,8 +69,9 @@ class RunState:
         return sum(1 for r in self.attn)
 
 
-class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin, SplashMixin, Shell):
-    TABS = (("format", "Format"), ("extras", "Extras"), ("naming", "Naming"), ("live", "Live"), ("activity", "Activity"))
+class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin, ProtectMixin, SplashMixin, Shell):
+    TABS = (("format", "Format"), ("sound", "Sound"), ("extras", "Extras"), ("naming", "Naming"), ("live", "Live"),
+            ("activity", "Activity"))
 
     def __init__(self, settings, initial=""):
         Shell.__init__(self, settings)
@@ -89,6 +93,7 @@ class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin
         self._init_advanced()
         self._init_activity()
         self._init_settings()
+        self._init_protect()
         self.root.after(40, self.begin)
 
     # ---------------------------------------------------------------- start-up
@@ -107,7 +112,10 @@ class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin
     def finish_start(self):
         self.splashing = False
         self.paint(first=True)
+        self.root.after(900, lambda: netio.prewarm(netio.SEARCH_HOSTS))     # the first search finds a connection waiting
+        self.root.after(1500, lambda: threading.Thread(target=suggest.warm, name="suggest-warm", daemon=True).start())
         self.root.after(2500, self.maybe_tune)
+        self.root.after(self.SHIELD_DELAY, self.start_shield)
 
     def maybe_tune(self):
         """Measure this computer and connection in the background (Automatic mode, at most weekly)."""
@@ -318,6 +326,8 @@ class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin
             self.on_resolved(*payload)
         elif kind == "art":
             self.on_art(payload)
+        elif kind == "suggest":
+            self.on_suggest(*payload)
         elif kind == "ev":
             self.on_event(payload)
         elif kind == "ask":
@@ -333,6 +343,8 @@ class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin
             self.on_tidied(payload)
         elif kind == "tuned":
             self.on_tuned(payload)
+        elif kind == "shield":
+            self.on_shield(payload)
         elif kind == "error":
             self.on_error(*payload)
         elif kind == "done":
@@ -345,6 +357,8 @@ class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin
         elif name == "job":
             if self.run:
                 self.run.note = f"Something went wrong: {message}"
+        elif name == "pick":
+            self.pick_failed(message)
         elif name == "tidy":
             self.on_tidied(f"Couldn’t finish: {message}")
         elif name == "models":
@@ -353,6 +367,8 @@ class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin
     def on_worker_done(self, name):
         if name == "job":
             self.finish_job()
+        if name in ("job", "pick"):
+            self._flush_picks()
 
     # ---------------------------------------------------------------- running a job
     def start_job(self):
@@ -362,6 +378,9 @@ class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin
         os.makedirs(st.outdir, exist_ok=True)
         tracks = list(self.col.tracks)
         self.run = RunState(len(tracks), st.outdir)
+        self.run.settings = st
+        self.picks.clear()
+        self._pick = None
         self.pulse = None
         self.shown_fraction = 0.0
         self.reset_activity()
@@ -432,6 +451,9 @@ class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin
         r = self.run
         if r is None:
             return
+        if self._pick is not None:
+            self.on_pick_event(ev)
+            return
         kind = ev["type"]
         if kind == "phase":
             r.phase = ev["text"]
@@ -465,7 +487,7 @@ class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin
             r.bursts += 1
         row = dict(title=res.track or ev["track"].title, artist=res.artist or ev["track"].artist, status=res.status,
                    note=res.note, kbps=res.kbps or res.quality_kbps, attention=res.attention, thumb=res.thumb, path=res.path,
-                   service=res.source, art=ev["track"].artwork)
+                   service=res.source, art=ev["track"].artwork, close=res.close, track=ev["track"])
         if res.status != "skipped" or res.attention:
             if len(r.rows) >= THUMBS_KEPT:                  # old thumbnails go; the text rows stay
                 r.rows[-THUMBS_KEPT]["thumb"] = None
@@ -487,6 +509,7 @@ class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin
         self.set_stage("done")
         if not r.stopped:
             self.cue("complete")
+            self.offer_close_matches()
         self.activity_dirty = True
 
     def open_folder(self):
@@ -560,6 +583,7 @@ class App(SourceMixin, QualityMixin, AdvancedMixin, ActivityMixin, SettingsMixin
                 return
         self.src_remember()
         self.s.save()
+        suggest.INDEX.save()
         self.runner.cancel()
         if self.runner.busy():
             self.root.title("Closing…")

@@ -72,6 +72,7 @@ class Result:
     path: str = ""
     size: int = 0
     lyrics: bool = False
+    close: list = field(default_factory=list)   # no-file / bad-length: options that are close to the song (closematch.py)
 
     @property
     def attention(self):

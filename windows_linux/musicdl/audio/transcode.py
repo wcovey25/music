@@ -5,7 +5,8 @@ Two decisions live here:
   * plan()   copy the audio untouched when the source already matches the target (re-encoding lossy audio
              only loses quality), otherwise encode;
   * encode() build the ffmpeg command for MP3 / AAC / FLAC / ALAC / WAV, honouring sample rate, bit depth
-             and any custom flags, and run it without a console window, stoppable at any moment.
+             and any custom flags, and run it without a console window, stoppable at any moment;
+  * run()    the shared way to run ffmpeg (also used by audio/process.py to listen to a file before finishing it).
 """
 import os
 import shutil
@@ -13,7 +14,7 @@ import subprocess
 import threading
 import time
 
-from .. import platform_
+from .. import platform_, resources
 from ..config import FORMATS, OutFmt
 from ..core.models import EngineError, Stopped
 
@@ -72,6 +73,18 @@ def bit_depth_of(path):
         return 16
 
 
+def probe_pcm(path, family=""):
+    """(sample rate, bits per sample) a source file says it has; 0 where the tags can't tell (Opus is always 48 kHz)."""
+    try:
+        import mutagen
+        info = mutagen.File(path).info
+    except Exception:
+        info = None
+    rate = int(getattr(info, "sample_rate", 0) or 0)
+    bits = int(getattr(info, "bits_per_sample", 0) or 0)
+    return rate or (48000 if family == "opus" else 0), bits
+
+
 def plan(src_codec, src_kbps, fmt, src_bits=16):
     """'copy' when the source can be used as-is for `fmt`, else 'encode'."""
     if fmt.flags or fmt.sample_rate:
@@ -104,20 +117,14 @@ def codec_args(fmt, src_bits=16, src_lossless=False):
     return args + list(fmt.flags)
 
 
-def encode(src, dst, fmt: OutFmt, action="encode", threads=2, stop=None, src_lossless=False):
-    """Write `dst` from `src`. Raises Stopped / EngineError."""
-    if action == "copy" and fmt.key == "mp3" and src.lower().endswith(".mp3"):
-        shutil.copyfile(src, dst)                         # no process needed
-        return
-    ff = ffmpeg_path()
-    if not ff:
-        raise EngineError("ffmpeg not found — " + platform_.ffmpeg_hint())
-    bits = bit_depth_of(src) if src_lossless else 16
-    audio = ["-c:a", "copy"] if action == "copy" else codec_args(fmt, bits, src_lossless)
-    cmd = [ff, "-nostdin", "-y", "-v", "error", "-i", src, "-vn", "-map_metadata", "-1", *audio,
-           "-threads", str(max(1, min(8, threads))), dst]
-    p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=platform_.NO_WINDOW)
-    deadline = time.monotonic() + 1800
+def run(cmd, stop=None, timeout=1800):
+    """Run an ffmpeg command at a polite priority, stoppable at any moment. Returns (exit code, stderr text).
+    Raises Stopped when `stop` is set, EngineError when it takes longer than `timeout` seconds."""
+    if stop is not None and stop.is_set():
+        raise Stopped()
+    cmd, nice = resources.launch(cmd)                      # gentle priority when the computer is warm or busy
+    p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=platform_.NO_WINDOW | nice)
+    deadline = time.monotonic() + timeout
     while True:
         try:
             _, err = p.communicate(timeout=0.4)
@@ -129,8 +136,35 @@ def encode(src, dst, fmt: OutFmt, action="encode", threads=2, stop=None, src_los
                 if stop is not None and stop.is_set():
                     raise Stopped()
                 raise EngineError("ffmpeg timed out") from None
-    if p.returncode != 0 or not os.path.exists(dst):
-        raise EngineError((err or b"").decode("utf-8", "ignore").strip()[-240:] or "ffmpeg failed")
+    return p.returncode, (err or b"").decode("utf-8", "ignore")
+
+
+def encode(src, dst, fmt: OutFmt, action="encode", threads=2, stop=None, src_lossless=False, af=""):
+    """Write `dst` from `src`. `af` is an ffmpeg audio filter chain (volume, trim, EQ …) applied on the way; it needs a
+    real encode, so a "copy" is turned into one. Raises Stopped / EngineError."""
+    if af:
+        action = "encode"
+    if action == "copy" and fmt.key == "mp3" and src.lower().endswith(".mp3"):
+        shutil.copyfile(src, dst)                         # no process needed
+        return
+    ff = ffmpeg_path()
+    if not ff:
+        raise EngineError("ffmpeg not found — " + platform_.ffmpeg_hint())
+    bits = bit_depth_of(src) if src_lossless else 16
+    audio = ["-c:a", "copy"] if action == "copy" else codec_args(fmt, bits, src_lossless)
+    filt = ["-af", af] if af else []
+    cmd = [ff, "-nostdin", "-y", "-v", "error", "-i", src, "-vn", "-map_metadata", "-1", *filt, *audio,
+           "-threads", str(max(1, min(8, threads))), dst]
+    code, err = run(cmd, stop)
+    if code != 0 or not os.path.exists(dst):
+        raise EngineError(err.strip()[-240:] or "ffmpeg failed")
+
+
+def writes_16bit(fmt, src_bits=16, src_lossless=False):
+    """True when `fmt` ends up as 16-bit integer samples — the one case where a filtered signal is worth dithering."""
+    if fmt.key not in ("flac", "alac", "wav"):
+        return False
+    return (fmt.bit_depth or (src_bits if src_lossless and src_bits > 16 else 16)) <= 16
 
 
 def extension_of(fmt):
