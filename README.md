@@ -58,7 +58,7 @@ The Windows edition is being brought level with the macOS edition. Details and s
 | E | Protection: start-up file check and restore, read-only lock, settings and library backups, recovery `.bat` | done |
 | D | Interface: Live dashboard, artwork tilt, spectrum, Motion setting, first-run sheets, new icon and `.ico`, new launch animation and sound | done |
 
-Checked: 563 offline tests pass on Linux (CPython 3.11, Tk 9.0); the new screens (launch, first-run sheets, Live
+Checked: 582 offline tests pass on Linux (CPython 3.11, Tk 9.0); the new screens (launch, first-run sheets, Live
 during a run, spectrum, tilt, Settings) were looked at headless (Xvfb), light and dark, at the smallest window size; a
 200-song stress run stays flat. **Not checked on a real Windows PC**: the Windows API readings (CPU, power, Animation
 effects), the read-only lock, the recovery `.bat`, the Windows Security link, cleaner detection, starting by

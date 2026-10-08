@@ -444,7 +444,7 @@ musicdl/
   telemetry/  speed, latency, searches per minute, ETA
   ai/         Ollama / OpenAI / Anthropic / Gemini connectors and the tasks built on them
   platform_.py   everything that differs per operating system
-tests/        cd tests && py -3 -m unittest      (563 tests, no internet needed)
+tests/        cd tests && py -3 -m unittest      (582 tests, no internet needed)
               py -3 stress.py 400 8              (400 songs, 8 at once: memory, threads, Stop)
               ui_shots.py                        (screenshots of the window for a look; needs a display)
 ```
