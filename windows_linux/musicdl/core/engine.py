@@ -55,6 +55,24 @@ UPGRADE_RETRY = 30 * 86400           # how long "no better version exists" is be
 RECHECK = 6.0                        # seconds before a catalogue that could not be asked (rate limit, outage) is asked again
 
 
+
+def _clear_stale_temp(outdir, older_than=6 * 3600):
+    """Remove temp folders a run left behind (a crash, a power cut). Only ones untouched for a while: a run working in
+    the same folder right now keeps its own."""
+    cutoff = time.time() - older_than
+    try:
+        names = os.listdir(outdir)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(outdir, name)
+        try:
+            if name.startswith(".musicdl_tmp") and os.path.isdir(path) and os.path.getmtime(path) < cutoff:
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
+
+
 class _Transient(Exception):
     """A picture could not be fetched *this time* (network trouble): not a reason to remember "no artwork"."""
 
@@ -132,7 +150,7 @@ class Job:
         self._index = None
         self.counts = {}
         self.bytes_written = 0
-        self.tmp_root = os.path.join(outdir, ".musicdl_tmp")
+        self.tmp_root = os.path.join(outdir, ".musicdl_tmp-" + os.urandom(6).hex())   # its own: another run here has its own
         self._name_locks = {}
         self._lock = threading.Lock()
         self.tol = settings.tolerance / 100.0
@@ -169,7 +187,7 @@ class Job:
 
     def run(self):
         os.makedirs(self.outdir, exist_ok=True)
-        shutil.rmtree(self.tmp_root, ignore_errors=True)
+        _clear_stale_temp(self.outdir)
         os.makedirs(self.tmp_root, exist_ok=True)
         self.lib = Library(self.outdir)
         netio.reset_health()                                      # a host that failed in an earlier run gets a fresh start
@@ -850,7 +868,9 @@ class Job:
             os.makedirs(os.path.dirname(rc.final), exist_ok=True)
             os.replace(path, rc.final)
         except PermissionError:
-            return Result("error", t.title, t.artist, note="File is in use — close your player and re-run")
+            if os.access(os.path.dirname(rc.final), os.W_OK):             # (writable folder: a file another program has open)
+                return Result("error", t.title, t.artist, note="File is in use — close your player and re-run")
+            return Result("error", t.title, t.artist, note="Can't write to this folder — check its permissions, then re-run")
         if lyr and lyr.synced and st.use_lrc():
             self._write_lrc(rc, lyr.synced)
         info2 = read_info(rc.final) or info

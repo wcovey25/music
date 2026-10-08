@@ -124,7 +124,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(r["Foxtrot"].status, "bad-length")
         self.assertEqual(r["Golf"].status, "no-file", "a too-long listing is never even downloaded")
         self.assertFalse(os.path.exists(os.path.join(self.out, "Charlie - Tester.mp3")))
-        self.assertFalse(os.path.exists(os.path.join(self.out, ".musicdl_tmp")), "temp folder cleaned up")
+        self.assertFalse(any(n.startswith(".musicdl_tmp") for n in os.listdir(self.out)), "temp folder cleaned up")
         a = read_info(os.path.join(self.out, "Alpha - Tester.mp3"))
         self.assertTrue(a.cover)
         self.assertEqual((a.source, a.src_kbps, a.album, a.year), ("archive.org", 128, "Test Album", "2001"))
@@ -280,7 +280,7 @@ class EngineTests(unittest.TestCase):
             SRV.delay = 0.0
         self.assertLess(dt, 6, "stop returns promptly")
         self.assertFalse([f for f in os.listdir(out) if f.endswith(".mp3")])
-        self.assertFalse(os.path.exists(os.path.join(out, ".musicdl_tmp")))
+        self.assertFalse(any(n.startswith(".musicdl_tmp") for n in os.listdir(out)))
 
 
 class DuplicateTests(unittest.TestCase):
@@ -508,7 +508,7 @@ class DiskFullTests(unittest.TestCase):
         self.assertEqual(counts, {"ok": 1})
         self.assertEqual([e["type"] for e in ev if e["type"] in ("paused", "resumed")], ["paused", "resumed"])
         self.assertTrue(os.path.exists(os.path.join(self.out, "A1 - Tester.mp3")))
-        self.assertFalse(os.path.exists(os.path.join(self.out, ".musicdl_tmp")), "half-written files are cleaned up")
+        self.assertFalse(any(n.startswith(".musicdl_tmp") for n in os.listdir(self.out)), "half-written files are cleaned up")
 
     def test_ffmpeg_out_of_space_message_is_recognised(self):
         real, state = transcode.encode, {"hit": 0}

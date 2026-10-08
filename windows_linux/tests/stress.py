@@ -83,7 +83,7 @@ def main():
         problems.append(f"memory kept growing ({mid:.0f} -> {rss1:.0f} MB)")
     if threading.active_count() > base_threads + 2:
         problems.append("threads left running")
-    if os.path.exists(os.path.join(OUT, ".musicdl_tmp")):
+    if any(n.startswith(".musicdl_tmp") for n in os.listdir(OUT)):
         problems.append("temp folder left behind")
 
     # second run over the same folder: everything must be recognised, nothing downloaded again
@@ -108,7 +108,7 @@ def main():
     print(f"stop mid-run: wound down in {time.time() - t2:.1f}s after {len(done2)} songs, alive={w2.is_alive()}")
     if w2.is_alive() or time.time() - t2 > 15:
         problems.append("Stop was slow or hung")
-    if os.path.exists(os.path.join(shutil_out, ".musicdl_tmp")):
+    if any(n.startswith(".musicdl_tmp") for n in os.listdir(shutil_out)):
         problems.append("Stop left a temp folder")
     partial = [f for _r, _d, fs in os.walk(shutil_out) for f in fs if f.endswith((".part", ".tmp"))]
     if partial:
