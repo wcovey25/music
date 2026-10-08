@@ -76,3 +76,14 @@ Diff lines are `diff | grep -c '^[<>]'` (mac vs this tree). "Newer" says whose s
 ## 2. Progress
 
 (updated as each group lands; see the end of this file for what is untested)
+
+### Group A — networking & speed: **done** (merged where noted)
+
+| Item | Status | Notes |
+| --- | --- | --- |
+| A1 core/netconn.py | done | as the Mac file; Windows note on WSAEWOULDBLOCK / select's except-set in the docstring. Tests: `test_netfast.py` (name cache, address interleaving, a hung address raced past, one pool for all threads, no cookies, prewarm reuse) |
+| A2 core/netstats.py | done | unchanged from the Mac file (pure Python). Tests: RFC 6298 maths, timeouts, percentiles, thread safety |
+| A3 core/netio.py | merged | Mac layer + yours kept: `ITUNES_LIMIT` (1.6 s / 1.2–14 s, now also `hedge_ok=False`), `request(..., throttle=())` → slows the limiter (15 s hold) like a 429, `Memo.forget`. `pressure()` also counts a throttled limiter. `prewarm()` is off when `MUSICDL_NO_PREWARM` is set (tests/helpers.py sets it so tests never reach the real services). `ttl=`/`hedge=` added to Deezer search, iTunes lookups and archive.org searches. Tests: hedging (wins, strict hosts never hedged, Stop), cache (ttl, copies, merging, failures not kept), stale-connection free retry, fitted timeouts, stall detection, iTunes 403 still pushback |
+| A4 resources.py / telemetry | merged | `resources.py`, `telemetry/monitor.py`, `telemetry/stats.py` from the Mac; wording adapted; governor messages say "Easing off …" for battery / battery saver / site pushback / busy CPU (`pace` event carries `easing`; the progress card shows it only while easing). Engine worker pool rebuilt on `Budget` + `Governor` (≥10 songs), manual number = ceiling, encodes and the source check go through `Budget.cpu`. `autotune.py` uses `resources.plan` and keeps the old rule as fallback |
+| A4 platform_.py | done (**untested on Windows**) | `hardware`, `physical_cores` (GetLogicalProcessorInformationEx), `cpu_ticks` (GetSystemTimes), `cpu_cores` (NtQuerySystemInformation class 8), `core_tiers` → None, `thermal_state` → 0 always, `power_source` (GetSystemPowerStatus: battery + battery saver), `compute_priority` (BELOW_NORMAL / IDLE priority class), `thread_priority` (SetThreadPriority), `reduce_motion` (SPI_GETCLIENTAREAANIMATION). Non-Windows: "can't say" values (no new Linux code). Parsers tested with synthetic data; a `skipUnless(win32)` test exercises the real calls on Windows |
+| `__main__.py` | merged | `sys.setswitchinterval(0.001)` |

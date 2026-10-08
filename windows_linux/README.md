@@ -168,6 +168,35 @@ If your drive runs out of space the app does not mark songs as failed. It **paus
 space, or change the folder, and downloading carries on by itself once there is room for the song plus a little spare.
 Nothing is lost: the song that was in progress is retried, not skipped.
 
+### Speed on long playlists
+
+When a run starts the app looks at the computer: how many CPU cores, how much memory, and how fast the connection is
+(the weekly *Automatic* measurement). From that it plans how many songs to work on at once and how many may be encoding
+at once — about one per core, and about 10 Mbps of connection per song, never more than 12 — and starts at roughly 60%
+of it. The first few encodes run at normal priority, the rest at below-normal priority so the window and your other
+programs stay responsive.
+
+For **10 songs or more** a governor then looks at the computer every couple of seconds and adjusts:
+
+- **Faster while it pays.** If every place is busy, the CPUs have room, the connection isn't full and nothing is
+  failing, it tries one more song at once and keeps it only if the throughput really rose; otherwise it steps back and
+  rests four minutes before trying again.
+- **Easier when something pushes back.** Errors, a site asking for fewer requests, or CPUs that stay fully busy take
+  one away.
+- **Gentler on a battery.** Unplugged it uses fewer songs at once and encodes at lower priority; with **battery saver**
+  on it uses two at most. It speeds up again by itself when the charger is back.
+
+The progress card says when it is holding back ("Easing off while on battery — 2 at once"). Shorter runs finish
+before there is anything to learn, so they simply use the plan. With **Automatic** off, the number you set under
+Settings is a ceiling that is never exceeded — it is only lowered for battery or pushback.
+
+*Limits, honestly:* Windows gives an ordinary program no temperature reading, so the app cannot tell when your laptop
+is hot (the heat rules of the Mac edition are in the code but always read "nominal" here); it relies on the CPU load and
+the power state instead. Hybrid processors (performance + efficiency cores) are counted as one kind of core. The
+readings (CPU load per core from the same counters Task Manager uses, memory, battery and battery saver) were written
+against the Windows API documentation and are exercised by tests with simulated readings; **on a real Windows PC they
+are untested**, as is how the governor behaves on a real long run.
+
 ### The progress picture
 
 While it works, the progress card shows a live waveform that moves with the real download speed and flares when a song
@@ -184,10 +213,20 @@ finishes. It turns amber when paused for a full disk, and settles when everythin
   when YouTube found nothing convincing. Songs coming up next are searched while the current ones download.
 - **Quality:** among results that match equally well, the better sound wins, but never more than the quality you chose.
   A "lossless" file that was clearly ripped from a video is not trusted as lossless.
-- **Networking:** each site is paced to what it will accept and slows down automatically if it complains; a site that is
-  down is skipped briefly instead of being retried over and over. Interrupted downloads resume where they stopped, and
-  a download is checked against the size the server announced. If a single connection is slow (under about 2 MB/s) a
-  large file is fetched over a few connections at once.
+- **Networking:** every thread shares one connection pool, so connections are reused instead of opened again for each
+  song, and a connection the server closed while it sat idle is replaced at once and the call repeated for free. New
+  connections try IPv6 and IPv4 side by side ("happy eyeballs", the family that worked is tried first next time) and
+  names are remembered for a minute; the lookup services a run will use are connected to while the plan is made. Each
+  site is paced to what it will accept and slows down automatically if it complains (and honours Retry-After; iTunes'
+  "403" counts as "slow down"); a site that is down is skipped briefly instead of being retried over and over. Each
+  host's round-trip time is measured, so timeouts fit the host rather than one number for all, and a lookup that runs
+  slower than the host's usual tail sends a second copy and keeps whichever answers first (never to iTunes or
+  MusicBrainz, which are strict about how often they are asked). Identical lookups made at the same moment are merged
+  and recent answers remembered for a few minutes (a failed lookup never is). Interrupted downloads resume where they
+  stopped, a connection whose speed collapses is dropped and picked up again, and a download is checked against the
+  size the server announced. If a single connection is slow (under about 2 MB/s) a large file is fetched over several
+  connections at once — only as many as actually make it faster. *Tested against local servers that misbehave on
+  purpose (drops, throttling, slow answers); not measured on real downloads, so no real-world speed-up is claimed.*
 
 ### AI Mode
 

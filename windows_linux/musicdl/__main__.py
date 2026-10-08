@@ -13,6 +13,10 @@ def main(argv=None):
         return 0
     logging.basicConfig(filename=platform_.log_path(), level=logging.INFO, encoding="utf-8",
                         format="%(asctime)s %(levelname)s %(message)s")
+    # Let the window's thread get the interpreter back after 1 ms rather than 5 ms when download threads are busy
+    # (measured on the macOS edition against six threads that only compute: a UI timer that was 13 ms late was 2 ms late,
+    # and those threads got ~10% less done; the app's own threads mostly wait for the network and ffmpeg)
+    sys.setswitchinterval(0.001)
     try:
         from .config import Settings
         from .ui.app import App
