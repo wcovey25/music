@@ -50,6 +50,8 @@ class ProtectMixin:
                 rep = shield.check(root, sdir)
                 if self.s.shield_lock:
                     shield.lock(root, True)                         # (files an update or a restore wrote are locked too)
+                else:
+                    shield.lock(root, False)                        # (an unlock that a previous run could not finish)
                 shield.write_lifeline(sdir, root)
                 self.runner.post("shield", rep)
             except Exception:
@@ -129,7 +131,11 @@ class ProtectMixin:
         self.s.save()
         if root:
             n = shield.lock(root, bool(on))
-            self.shield_msg = (f"Locked {n} files" if on else f"Unlocked {n} files") if n else ""
+            left = 0 if on else shield.lock_state(root)[0]
+            if left:
+                self.shield_msg = f"{left} files could not be unlocked; they will be unlocked when the app next starts"
+            else:
+                self.shield_msg = (f"Locked {n} files" if on else f"Unlocked {n} files") if n else ""
         self._settings_refresh()
 
     def show_recovery(self):
