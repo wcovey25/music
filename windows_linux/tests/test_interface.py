@@ -493,8 +493,8 @@ class FrameLoopTests(unittest.TestCase):
         try:
             sh = self._shell(root)
             ran = []
-            sh.anims["bad"] = dict(t0=time.time(), dur=10.0, update=lambda v: 1 / 0, ease=lambda f: f, done=None)
-            sh.anims["good"] = dict(t0=time.time(), dur=10.0, update=lambda v: ran.append(v), ease=lambda f: f, done=None)
+            sh.anims["bad"] = dict(t0=time.monotonic(), dur=10.0, update=lambda v: 1 / 0, ease=lambda f: f, done=None)
+            sh.anims["good"] = dict(t0=time.monotonic(), dur=10.0, update=lambda v: ran.append(v), ease=lambda f: f, done=None)
             sh._loop()
             self.assertNotIn("bad", sh.anims)                                 # dropped, not kept failing every frame
             self.assertIn("good", sh.anims)
@@ -512,7 +512,7 @@ class FrameLoopTests(unittest.TestCase):
 
             def boom():
                 raise RuntimeError("finish")
-            sh.anims["done"] = dict(t0=time.time() - 1, dur=0.001, update=lambda v: None, ease=lambda f: f, done=boom)
+            sh.anims["done"] = dict(t0=time.monotonic() - 1, dur=0.001, update=lambda v: None, ease=lambda f: f, done=boom)
             sh._loop()
             self.assertIsNotNone(sh._loop_job)
         finally:
