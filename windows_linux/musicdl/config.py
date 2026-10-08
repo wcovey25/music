@@ -290,7 +290,7 @@ class Settings:
         except Exception:
             pass
         try:
-            with open(cls.path(), encoding="utf-8") as fh:
+            with open(cls.path(), encoding="utf-8-sig") as fh:
                 data = json.load(fh)
             if not isinstance(data, dict):
                 raise ValueError("not a settings object")
@@ -300,7 +300,7 @@ class Settings:
                     setattr(s, k, v)
         except OSError:
             pass
-        except ValueError:                                            # damaged and no good copy: keep it aside, start afresh
+        except (ValueError, RecursionError):                          # damaged and no good copy: keep it aside, start afresh
             from .core import shield
             shield.set_aside(cls.path())
         if not s.outdir:
@@ -313,13 +313,23 @@ class Settings:
             return fresh.clamp()
 
     def save(self):
+        tmp = self.path() + ".tmp"
         try:
-            tmp = self.path() + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(asdict(self), fh, indent=2)
             os.replace(tmp, self.path())
         except OSError:
-            pass
+            _discard(tmp)
+        except Exception:
+            _discard(tmp)                                             # (a value that is not JSON: nothing half-written stays)
+            raise
+
+
+def _discard(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------- API keys
