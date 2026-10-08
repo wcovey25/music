@@ -131,11 +131,12 @@ def runtime_state(root):
 # ---------------------------------------------------------------- locking
 
 def _flags_off(path):
-    """Make `path` writable and deletable again (clears Windows' read-only attribute)."""
+    """Make `path` writable and deletable again (clears Windows' read-only attribute). True if it worked."""
     try:
         os.chmod(path, os.stat(path).st_mode | stat.S_IWRITE)
+        return True
     except OSError:
-        pass
+        return False
 
 
 def _flags_on(path):
@@ -167,8 +168,7 @@ def lock(root, on=True):
         if on and not is_locked(path):
             n += _flags_on(path)
         elif not on and is_locked(path):
-            _flags_off(path)
-            n += 1
+            n += 1 if _flags_off(path) else 0
     return n
 
 
@@ -196,10 +196,10 @@ def _write_json(path, data):
 
 def _read_json(path):
     try:
-        with open(path, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8-sig") as fh:                  # (a BOM from an editor is not damage)
             data = json.load(fh)
         return data if isinstance(data, dict) else None
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
 
 
@@ -353,6 +353,12 @@ def check(root, sdir, repair_missing=True):
             _write_json(os.path.join(root, DIR, MANIFEST), saved)          # a cleaner took the manifest: take it back
             manifest = saved
             rep.note = "manifest restored"
+        elif os.path.isfile(os.path.join(sdir, SNAPSHOT)):
+            # a sealed install lost its file list: sealing again would take whatever is on disk now (a tampered file
+            # included) as the good copy, and overwrite the snapshot with it
+            rep.runtime.append("the program's file list is missing, so its files can't be checked")
+            rep.state = "attention"
+            return rep
         else:
             manifest = seal(root)                                           # first run on an install made without one
             rep.sealed_now = True
@@ -362,7 +368,7 @@ def check(root, sdir, repair_missing=True):
             take_snapshot(root, sdir, manifest)                             # a first run, or a real update: keep this one
             rep.updated = snap is not None
             snap = snapshot_info(sdir)
-    if missing and repair_missing and snap:
+    if missing and repair_missing and os.path.isfile(os.path.join(sdir, SNAPSHOT)):
         done, lost = restore(root, sdir, manifest, missing)
         rep.restored += done
         rep.lost += lost
@@ -404,7 +410,7 @@ def boot(root, sdir):
     """Put back deleted files from the snapshot, cheaply (existence only). Never overwrites anything."""
     info = snapshot_info(sdir)
     manifest = (read_manifest(root) if root else None) or (info or {}).get("manifest")
-    if not info or not manifest or not isinstance(manifest.get("files"), dict):
+    if not manifest or not isinstance(manifest.get("files"), dict):
         return []
     gone = [rel for rel in manifest["files"] if (resolve(root, rel) and not os.path.isfile(resolve(root, rel)))]
     if not gone:
@@ -466,12 +472,19 @@ def heal_settings(config_dir, sdir=None):
 
 
 def set_aside(path):
-    """Keep a damaged file next to where it was, as <name>.damaged (an older one is replaced). True if it moved."""
+    """Keep a damaged file next to where it was, as <name>.damaged. An earlier one is moved to <name>.damaged.1, .2 …
+    so none is lost. True if the file was moved."""
     if not os.path.exists(path):
         return False
     try:
         _flags_off(path)
-        os.replace(path, path + ".damaged")
+        dest = path + ".damaged"
+        if os.path.exists(dest):
+            n = 1
+            while os.path.exists(f"{dest}.{n}"):
+                n += 1
+            os.replace(dest, f"{dest}.{n}")
+        os.replace(path, dest)
         return True
     except OSError:
         return False
