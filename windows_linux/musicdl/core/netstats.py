@@ -134,11 +134,11 @@ class Registry:
     def snapshot(self, limit=8, since=None):
         """The busiest hosts first (those used within `since` seconds when given)."""
         now = time.monotonic()
-        rows = [h.snapshot() for h in self.hosts() if h.calls or h.errors]
+        hosts = [h for h in self.hosts() if h.calls or h.errors]
         if since is not None:
-            rows = [r for r in rows if now - r["last"] <= since]
-        rows.sort(key=lambda r: (r["last"], r["calls"]), reverse=True)
-        return rows[:limit]
+            hosts = [h for h in hosts if now - h.last <= since]
+        hosts.sort(key=lambda h: (h.last, h.calls), reverse=True)
+        return [h.snapshot() for h in hosts[:limit]]
 
     def reset(self):
         with self._lock:
