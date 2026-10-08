@@ -22,6 +22,7 @@ class Library:
         self.path = os.path.join(outdir, STATE_NAME)
         self._lock = threading.RLock()
         self._dirty, self._saved_at = 0, 0.0
+        self._gone = {}                                               # keys this run forgot: a save must not bring them back
         self.data = {"version": 3, "meta": {}, "catalog": {}, "tracks": {}, "files": {}}
         loaded = self._read()
         if loaded is None and os.path.exists(self.path):              # damaged: set aside, the last good copy instead
@@ -59,6 +60,7 @@ class Library:
         with self._lock:
             self.data["tracks"].pop(name, None)
             self.data["files"].pop(name, None)
+            self._gone.setdefault("tracks", set()).add(name)
             self._touch()
 
     def files(self):
@@ -87,21 +89,36 @@ class Library:
             if len(cat) > max_catalog:
                 for k in sorted(cat, key=lambda k: cat[k].get("t", 0))[:len(cat) - max_catalog]:
                     del cat[k]
+                    self._gone.setdefault("catalog", set()).add(k)
 
     def _touch(self):
         self._dirty += 1
         if time.time() - self._saved_at > 5:
             self.save()
 
+    def _merge_disk(self):
+        """Another run may have saved this folder's record since we read it: keep what it added. Our records win on the
+        same key, and what this run forgot stays forgotten. The folder listing ('files') is this run's alone."""
+        disk = self._read() or {}
+        for k in BUCKETS:
+            if k == "files" or not isinstance(disk.get(k), dict):
+                continue
+            merged = dict(disk[k])
+            merged.update(self.data[k])
+            for key in self._gone.get(k, ()):
+                merged.pop(key, None)
+            self.data[k] = merged
+
     def save(self, force=False):
         with self._lock:
             if not (self._dirty or force):
                 return
             try:
+                self._merge_disk()
                 tmp = self.path + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as fh:
                     json.dump(self.data, fh, separators=(",", ":"))
                 os.replace(tmp, self.path)
-                self._dirty, self._saved_at = 0, time.time()
+                self._dirty, self._saved_at, self._gone = 0, time.time(), {}
             except OSError as e:
                 log.warning("could not save library state: %s", e)
