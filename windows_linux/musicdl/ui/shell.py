@@ -56,7 +56,7 @@ class Shell:
         self.sheet_state = None
         self._hover = self._pressed = None
         self._relayout_job = None
-        self._last = time.time()
+        self._last = time.monotonic()
         self.busy = False                        # something is moving on its own (progress shimmer etc.)
         self.splashing = False                   # the launch animation is playing: the screen behind it takes no input
         self.sounds = Sounds(lambda: self.s)
@@ -365,7 +365,7 @@ class Shell:
 
     def animate(self, key, dur, update, ease=gk.ease, done=None, delay=0.0):
         """Run update(eased 0..1) every frame for `dur` seconds. A new animation with the same key replaces the old."""
-        self.anims[key] = dict(t0=time.time() + delay, dur=max(0.001, dur), update=update, ease=ease, done=done)
+        self.anims[key] = dict(t0=time.monotonic() + delay, dur=max(0.001, dur), update=update, ease=ease, done=done)
 
     def stop_anim(self, key):
         self.anims.pop(key, None)
@@ -373,7 +373,7 @@ class Shell:
     def _loop(self):
         if not self.alive:
             return
-        now = time.time()
+        now = time.monotonic()                                       # (wall-clock steps must not stall or speed up animations)
         dt, self._last = min(0.1, now - self._last), now
         finished = []
         for key, a in list(self.anims.items()):
@@ -383,17 +383,18 @@ class Shell:
             try:
                 a["update"](a["ease"](min(1.0, f)))
             except tk.TclError:
-                finished.append(key)
+                finished.append((key, a))
                 continue
             except Exception:
                 log.exception("animation %s failed", key)              # one broken step must not stop the frame loop
-                finished.append(key)
+                finished.append((key, a))
                 continue
             if f >= 1.0:
-                finished.append(key)
-        for key in finished:
-            a = self.anims.pop(key, None)
-            if a and a["done"]:
+                finished.append((key, a))
+        for key, a in finished:
+            if self.anims.get(key) is a:                             # (a replacement started under this key stays)
+                del self.anims[key]
+            if a["done"]:
                 try:
                     a["done"]()
                 except Exception:
@@ -518,6 +519,7 @@ class Shell:
     def swap(self, tag, redraw, animate=True):
         """Replace what is under `tag`: fade it out, run redraw() (which creates the new items), fade those in."""
         if not animate or not self.W:
+            self.stop_anim(("dismiss", tag))                          # (a fade-out still pending would redraw the old page)
             redraw()
             return
 
